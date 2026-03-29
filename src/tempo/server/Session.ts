@@ -51,18 +51,45 @@ import {
 } from '../session/Chain.js'
 import * as ChannelStore from '../session/ChannelStore.js'
 import { createSessionReceipt } from '../session/Receipt.js'
-import type { SessionCredentialPayload, SessionReceipt, SignedVoucher } from '../session/Types.js'
+import type {
+  SessionChallengeMethodDetails,
+  SessionCredentialPayload,
+  SessionReceipt,
+  SignedVoucher,
+} from '../session/Types.js'
 import { parseVoucherFromPayload, verifyVoucher } from '../session/Voucher.js'
 import { captureRequestBodyProbe, isSessionContentRequest } from './internal/request-body.js'
 import * as Transport from './internal/transport.js'
 
 /** Challenge methodDetails shape for session methods. */
-type SessionMethodDetails = {
+type SessionMethodDetails = SessionChallengeMethodDetails & {
   escrowContract: Address
   chainId: number
-  channelId?: Hex | undefined
-  minVoucherDelta?: string | undefined
-  feePayer?: boolean | undefined
+}
+
+function createChallengeHints(
+  channel: ChannelStore.State | null,
+  amount: bigint | undefined,
+):
+  | Pick<SessionMethodDetails, 'acceptedCumulative' | 'deposit' | 'requiredCumulative' | 'spent'>
+  | undefined {
+  if (!channel || channel.finalized || channel.deposit === 0n || channel.closeRequestedAt !== 0n)
+    return undefined
+
+  const requiredCumulative = (() => {
+    if (amount === undefined) return undefined
+    const nextSpent = channel.spent + amount
+    const target =
+      nextSpent > channel.highestVoucherAmount ? nextSpent : channel.highestVoucherAmount
+    return target.toString()
+  })()
+
+  return {
+    acceptedCumulative: channel.highestVoucherAmount.toString(),
+    deposit: channel.deposit.toString(),
+    ...(requiredCumulative !== undefined && { requiredCumulative }),
+    spent: channel.spent.toString(),
+  }
 }
 
 /**
@@ -166,6 +193,11 @@ export function session<const parameters extends session.Parameters>(
         parameters.escrowContract ??
         defaults.escrowContract[chainId as keyof typeof defaults.escrowContract]
 
+      const amount = parseUnits(request.amount, request.decimals ?? decimals)
+      const challengeHints = request.channelId
+        ? createChallengeHints(await store.getChannel(request.channelId as Hex), amount)
+        : undefined
+
       // Extract feePayer.
       const resolvedFeePayer = (() => {
         if (request.feePayer === false) return credential ? false : undefined
@@ -178,6 +210,7 @@ export function session<const parameters extends session.Parameters>(
 
       return {
         ...request,
+        ...challengeHints,
         chainId,
         escrowContract: resolvedEscrow,
         feePayer: resolvedFeePayer,
