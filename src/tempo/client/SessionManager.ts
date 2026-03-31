@@ -12,6 +12,7 @@ import { parseEvent } from '../session/Sse.js'
 import type { SessionCredentialPayload, SessionReceipt } from '../session/Types.js'
 import * as Ws from '../session/Ws.js'
 import { reconcileChannelReceipt, type ChannelEntry } from './ChannelOps.js'
+import { charge as chargePlugin } from './Charge.js'
 import { session as sessionPlugin } from './Session.js'
 
 type WebSocketConstructor = {
@@ -83,9 +84,9 @@ export type PaymentResponse = Response & {
  * Creates a session manager that handles the full client payment lifecycle:
  * channel open, incremental vouchers, SSE streaming, and channel close.
  *
- * Internally delegates to the `session()` method for all
- * channel state management and credential creation, and to `Fetch.from`
- * for the 402 challenge/retry flow.
+ * Internally delegates to the `session()` method for channel state
+ * management and credential creation, while owning a bounded 402 retry
+ * loop for zero-auth bootstrap and stateless resume.
  *
  * ## Session resumption
  *
@@ -135,15 +136,9 @@ export function sessionManager(parameters: sessionManager.Parameters): SessionMa
       spent = entry.spent
     },
   })
-
-  const wrappedFetch = Fetch.from({
-    fetch: fetchFn,
-    methods: [method],
-    onChallenge: async (challenge, _helpers) => {
-      lastChallenge = challenge
-      return undefined
-    },
-    orderChallenges: parameters.orderChallenges,
+  const authMethod = chargePlugin({
+    account: parameters.account,
+    getClient: parameters.client ? () => parameters.client! : parameters.getClient,
   })
 
   function updateSpentFromReceipt(receipt: SessionReceipt | null | undefined) {
@@ -155,6 +150,26 @@ export function sessionManager(parameters: sessionManager.Parameters): SessionMa
     }
     const next = BigInt(receipt.spent)
     spent = spent > next ? spent : next
+  }
+
+  function isZeroAuthChallenge(challenge: Challenge.Challenge): boolean {
+    return (
+      challenge.method === 'tempo' &&
+      challenge.intent === 'charge' &&
+      challenge.request.amount === '0'
+    )
+  }
+
+  function withAuthorizationHeader(
+    headers: RequestInit['headers'],
+    credential: string,
+  ): Record<string, string> {
+    const normalized = Fetch.normalizeHeaders(headers)
+    for (const key of Object.keys(normalized)) {
+      if (key.toLowerCase() === 'authorization') delete normalized[key]
+    }
+    normalized.Authorization = credential
+    return normalized
   }
 
   function reconcileReceipt(receipt: SessionReceipt | null | undefined) {
@@ -292,7 +307,60 @@ export function sessionManager(parameters: sessionManager.Parameters): SessionMa
     init?: SessionRequestInit,
   ): Promise<PaymentResponse> {
     lastUrl = input
-    const response = await wrappedFetch(input, init)
+    const { orderChallenges: requestOrderChallenges, ...fetchInit } = init ?? {}
+    let response = await fetchFn(input, fetchInit)
+    let attemptedZeroAuth = false
+
+    for (let attempts = 0; response.status === 402 && attempts < 3; attempts++) {
+      const challenges = Challenge.fromResponseList(response)
+      const sessionCandidates = AcceptPayment.selectChallengeCandidates(
+        challenges,
+        [method] as const,
+        AcceptPayment.resolve([method] as const).entries,
+      )
+      const orderedSessionCandidates = requestOrderChallenges
+        ? await requestOrderChallenges(sessionCandidates)
+        : parameters.orderChallenges
+          ? await parameters.orderChallenges(sessionCandidates)
+          : sessionCandidates
+      const sessionChallenge = orderedSessionCandidates[0]?.challenge
+      if (sessionChallenge) lastChallenge = sessionChallenge
+      else if (challenges[0]) lastChallenge = challenges[0]
+
+      const zeroAuthChallenge =
+        !channel && !attemptedZeroAuth ? challenges.find(isZeroAuthChallenge) : undefined
+
+      if (zeroAuthChallenge) {
+        attemptedZeroAuth = true
+        const credential = await authMethod.createCredential({
+          challenge: zeroAuthChallenge as never,
+          context: {},
+        })
+        response = await fetchFn(input, {
+          ...fetchInit,
+          headers: withAuthorizationHeader(fetchInit.headers, credential),
+        })
+        continue
+      }
+
+      if (sessionCandidates.length > 0 && !sessionChallenge) {
+        throw new Error(
+          `No method found for challenges: ${challenges.map((c) => `${c.method}.${c.intent}`).join(', ')}`,
+        )
+      }
+      if (!sessionChallenge) break
+
+      const credential = await method.createCredential({
+        challenge: sessionChallenge as never,
+        context: {},
+      })
+      response = await fetchFn(input, {
+        ...fetchInit,
+        headers: withAuthorizationHeader(fetchInit.headers, credential),
+      })
+    }
+
+    await method.onResponse?.(response)
     return toPaymentResponse(response)
   }
 

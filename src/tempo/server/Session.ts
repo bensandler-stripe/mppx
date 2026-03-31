@@ -31,7 +31,7 @@ import {
   VerificationFailedError,
 } from '../../Errors.js'
 import type { Challenge, Credential } from '../../index.js'
-import type { LooseOmit, NoExtraKeys } from '../../internal/types.js'
+import type { LooseOmit, MaybePromise, NoExtraKeys } from '../../internal/types.js'
 import * as Method from '../../Method.js'
 import * as Store from '../../Store.js'
 import * as Client from '../../viem/Client.js'
@@ -39,6 +39,7 @@ import type * as z from '../../zod.js'
 import * as Account from '../internal/account.js'
 import * as defaults from '../internal/defaults.js'
 import * as FeePayer from '../internal/fee-payer.js'
+import * as Proof from '../internal/proof.js'
 import type * as types from '../internal/types.js'
 import * as Methods from '../Methods.js'
 import {
@@ -90,6 +91,35 @@ function createChallengeHints(
     ...(requiredCumulative !== undefined && { requiredCumulative }),
     spent: channel.spent.toString(),
   }
+}
+
+async function findRequestedChannel(parameters: {
+  amount: bigint
+  request: { channelId?: Hex | undefined; currency: Address; recipient: Address }
+  resolvedEscrow: Address
+  chainId: number
+  source: string | undefined
+  store: ChannelStore.ChannelStore
+}): Promise<ChannelStore.State | null> {
+  const { amount, chainId, request, resolvedEscrow, source, store } = parameters
+
+  if (request.channelId) {
+    return store.getChannel(request.channelId)
+  }
+
+  if (!source) return null
+
+  const payer = Proof.parsePkhSource(source)
+  if (!payer || payer.chainId !== chainId) return null
+
+  return ChannelStore.findReusableChannel(store, {
+    amount,
+    chainId,
+    escrowContract: resolvedEscrow,
+    payee: request.recipient,
+    payer: payer.address,
+    token: request.currency,
+  })
 }
 
 /**
@@ -169,7 +199,7 @@ export function session<const parameters extends session.Parameters>(
     transport: transport as never,
 
     // TODO: dedupe `{charge,session}.request`
-    async request({ credential, request }) {
+    async request({ credential, input, request }) {
       // Extract chainId from request or default.
       const chainId = await (async () => {
         if (request.chainId) return request.chainId
@@ -194,9 +224,20 @@ export function session<const parameters extends session.Parameters>(
         defaults.escrowContract[chainId as keyof typeof defaults.escrowContract]
 
       const amount = parseUnits(request.amount, request.decimals ?? decimals)
-      const challengeHints = request.channelId
-        ? createChallengeHints(await store.getChannel(request.channelId as Hex), amount)
-        : undefined
+      const source = await parameters.resolveSource?.({ credential, input, request })
+      const requestedChannel = await findRequestedChannel({
+        amount,
+        chainId: chainId as number,
+        request: {
+          channelId: request.channelId as Hex | undefined,
+          currency: request.currency as Address,
+          recipient: request.recipient as Address,
+        },
+        resolvedEscrow: resolvedEscrow as Address,
+        source,
+        store,
+      })
+      const challengeHints = createChallengeHints(requestedChannel, amount)
 
       // Extract feePayer.
       const resolvedFeePayer = (() => {
@@ -211,8 +252,11 @@ export function session<const parameters extends session.Parameters>(
       return {
         ...request,
         ...challengeHints,
-        chainId,
-        escrowContract: resolvedEscrow,
+        ...(!request.channelId && requestedChannel
+          ? { channelId: requestedChannel.channelId }
+          : {}),
+        chainId: chainId as number,
+        escrowContract: resolvedEscrow as Address,
         feePayer: resolvedFeePayer,
       }
     },
@@ -370,6 +414,22 @@ export declare namespace session {
     feePayerPolicy?: FeePayerPolicy | undefined
     /** Minimum voucher delta to accept (numeric string, default: "0"). */
     minVoucherDelta?: string | undefined
+    /**
+     * Resolves the authenticated payer identity used for stateless channel
+     * discovery when the client does not provide a channelId.
+     *
+     * Return the zero-dollar proof source DID (for example
+     * `did:pkh:eip155:4217:0x...`) from your server-managed auth/session
+     * context, such as a cookie-backed login established by `tempo.charge`
+     * proof auth.
+     */
+    resolveSource?:
+      | ((options: {
+          credential?: Credential.Credential | null | undefined
+          input?: globalThis.Request | undefined
+          request: Method.RequestDefaults<typeof Methods.session>
+        }) => MaybePromise<string | undefined>)
+      | undefined
     /**
      * Whether to wait for the open transaction to confirm on-chain before
      * responding. @default true
