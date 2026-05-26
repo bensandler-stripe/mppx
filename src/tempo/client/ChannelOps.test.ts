@@ -264,7 +264,9 @@ describe.runIf(isLocalnet)('createOpenPayload', () => {
       chainId: chain.id,
     })
 
-    expect((result.payload as any).authorizedSigner).toBe(payer.address)
+    expect(result.payload.action).toBe('open')
+    if (result.payload.action !== 'open') throw new Error('unexpected action')
+    expect(result.payload.authorizedSigner).toBe(payer.address)
   })
 
   test('derives authorizedSigner from voucherSigner when provided', async () => {
@@ -285,10 +287,9 @@ describe.runIf(isLocalnet)('createOpenPayload', () => {
       chainId: chain.id,
     })
 
-    expect((result.payload as any).authorizedSigner).toBe(voucherSigner.address)
-
     expect(result.payload.action).toBe('open')
     if (result.payload.action !== 'open') throw new Error('unexpected action')
+    expect(result.payload.authorizedSigner).toBe(voucherSigner.address)
 
     const transaction = Transaction.deserialize(result.payload.transaction)
     if (!('calls' in transaction)) throw new Error('unexpected transaction type')

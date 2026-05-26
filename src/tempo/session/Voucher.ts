@@ -4,6 +4,7 @@ import type { Account, Client, Hex } from 'viem'
 import { hashTypedData } from 'viem'
 import { signTypedData } from 'viem/actions'
 
+import { getAccountSignerAddress } from '../internal/account.js'
 import type { SignedVoucher, Voucher } from './Types.js'
 
 type RawSign = (parameters: { hash: Hex; raw?: boolean | undefined }) => Promise<Hex>
@@ -89,13 +90,6 @@ function normalizeVoucherSignature(signature: Hex): Hex {
   // Tempo local accounts may append signature-envelope magic bytes for RPC
   // routing. Voucher signatures are direct envelopes without magic bytes.
   return SignatureEnvelope.serialize(envelope)
-}
-
-function getAccountSignerAddress(account: Account): Address.Address {
-  return (
-    (account as { accessKeyAddress?: Address.Address | undefined }).accessKeyAddress ??
-    account.address
-  )
 }
 
 function acceptsVoucherEnvelope(envelope: SignatureEnvelope.SignatureEnvelope): boolean {

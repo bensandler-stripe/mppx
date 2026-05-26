@@ -7,6 +7,7 @@ import * as Method from '../../Method.js'
 import * as Account from '../../viem/Account.js'
 import * as Client from '../../viem/Client.js'
 import * as z from '../../zod.js'
+import { getAccountSignerAddress } from '../internal/account.js'
 import * as defaults from '../internal/defaults.js'
 import * as Methods from '../Methods.js'
 import type { SessionCredentialPayload } from '../session/Types.js'
@@ -34,11 +35,6 @@ export const sessionContextSchema = z.object({
 })
 
 export type SessionContext = z.infer<typeof sessionContextSchema>
-
-function getVoucherSignerAddress(account: viem_Account): Address {
-  return ((account as unknown as { accessKeyAddress?: Address | undefined }).accessKeyAddress ??
-    account.address) as Address
-}
 
 function resolveVoucherSigner(
   account: viem_Account,
@@ -97,7 +93,7 @@ export function session(parameters: session.Parameters = {}) {
       account,
       contextVoucherSigner ?? parameters.voucherSigner,
     )
-    const authorizedSigner = getVoucherSignerAddress(voucherSigner)
+    const authorizedSigner = getAccountSignerAddress(voucherSigner)
 
     return { authorizedSigner, voucherSigner }
   }

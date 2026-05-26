@@ -1,4 +1,17 @@
 import type { Account, Address } from 'viem'
+import type { Account as TempoAccount } from 'viem/tempo'
+
+/** Returns whether an account is a Tempo access-key account. */
+export function isAccessKeyAccount(
+  account: Account,
+): account is Account & TempoAccount.AccessKeyAccount {
+  return 'accessKeyAddress' in account
+}
+
+/** Returns the address that should authorize direct account signatures. */
+export function getAccountSignerAddress(account: Account): Address {
+  return isAccessKeyAccount(account) ? account.accessKeyAddress : account.address
+}
 
 /**
  * Resolves a recipient address and optional fee payer from flexible input parameters.

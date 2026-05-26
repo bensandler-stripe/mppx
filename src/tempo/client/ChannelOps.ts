@@ -18,6 +18,7 @@ import { Abis } from 'viem/tempo'
 
 import type { Challenge } from '../../Challenge.js'
 import * as Credential from '../../Credential.js'
+import { getAccountSignerAddress } from '../internal/account.js'
 import * as defaults from '../internal/defaults.js'
 import { escrowAbi, getOnChainChannel } from '../session/Chain.js'
 import * as Channel from '../session/Channel.js'
@@ -31,11 +32,6 @@ export type ChannelEntry = {
   escrowContract: Address
   chainId: number
   opened: boolean
-}
-
-function getVoucherSignerAddress(account: viem_Account): Address {
-  return ((account as unknown as { accessKeyAddress?: Address | undefined }).accessKeyAddress ??
-    account.address) as Address
 }
 
 function resolveVoucherSigner(
@@ -149,7 +145,7 @@ export async function createOpenPayload(
 ): Promise<{ entry: ChannelEntry; payload: SessionCredentialPayload }> {
   const { escrowContract, payee, currency, deposit, initialAmount, chainId, feePayer } = options
   const voucherSigner = resolveVoucherSigner(account, options.voucherSigner)
-  const authorizedSigner = getVoucherSignerAddress(voucherSigner)
+  const authorizedSigner = getAccountSignerAddress(voucherSigner)
 
   const salt = Hex.random(32)
   const channelId = Channel.computeId({
