@@ -51,8 +51,12 @@ export function charge(parameters: charge.Parameters = {}) {
     }),
 
     async createCredential({ challenge, context }) {
-      const chainId = challenge.request.methodDetails?.chainId
-      const client = await getClient({ chainId })
+      const challengeChainId = challenge.request.methodDetails?.chainId
+      const client = await getClient({ chainId: challengeChainId })
+      const chainId = challengeChainId ?? client.chain?.id
+      if (chainId === undefined)
+        throw new Error('No `chainId` provided. Pass a chain ID in the challenge or client.')
+
       const account = getAccount(client, context)
 
       const { request } = challenge
@@ -62,7 +66,7 @@ export function charge(parameters: charge.Parameters = {}) {
       if (BigInt(amount) === 0n) {
         const signature = await signTypedData(client, {
           account,
-          domain: Proof.domain(chainId!),
+          domain: Proof.domain(chainId),
           types: Proof.types,
           primaryType: 'Proof',
           message: Proof.message(challenge.id, challenge.realm),
@@ -70,7 +74,7 @@ export function charge(parameters: charge.Parameters = {}) {
         return Credential.serialize({
           challenge,
           payload: { signature, type: 'proof' },
-          source: Proof.proofSource({ address: account.address, chainId: chainId! }),
+          source: Proof.proofSource({ address: account.address, chainId }),
         })
       }
 
@@ -156,7 +160,7 @@ export function charge(parameters: charge.Parameters = {}) {
         return Credential.serialize({
           challenge,
           payload: { hash, type: 'hash' },
-          source: `did:pkh:eip155:${chainId}:${account.address}`,
+          source: Proof.proofSource({ address: account.address, chainId }),
         })
       }
 
@@ -175,7 +179,7 @@ export function charge(parameters: charge.Parameters = {}) {
       return Credential.serialize({
         challenge,
         payload: { signature, type: 'transaction' },
-        source: `did:pkh:eip155:${chainId}:${account.address}`,
+        source: Proof.proofSource({ address: account.address, chainId }),
       })
     },
   })

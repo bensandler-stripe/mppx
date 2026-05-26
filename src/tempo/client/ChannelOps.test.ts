@@ -1,7 +1,8 @@
 import { Hex } from 'ox'
-import { type Address, createClient } from 'viem'
+import { SignatureEnvelope } from 'ox/tempo'
+import { type Address, createClient, decodeFunctionData } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { Addresses } from 'viem/tempo'
+import { Account as TempoAccount, Addresses, Transaction } from 'viem/tempo'
 import { beforeAll, describe, expect, test } from 'vp/test'
 import { nodeEnv } from '~test/config.js'
 import { deployEscrow, openChannel } from '~test/tempo/session.js'
@@ -15,6 +16,7 @@ import {
   chainId as chainIdDefaults,
   escrowContract as escrowContractDefaults,
 } from '../internal/defaults.js'
+import { escrowAbi } from '../session/Chain.js'
 import { verifyVoucher } from '../session/Voucher.js'
 import {
   createClosePayload,
@@ -140,6 +142,40 @@ describe('createVoucherPayload', () => {
     )
     expect(valid).toBe(true)
   })
+
+  test('uses raw access-key signatures when no voucherSigner is provided', async () => {
+    const accessKey = TempoAccount.fromSecp256k1(
+      '0x59c6995e998f97a5a0044966f09453863d462d2b3f1446a99f0a3d7b5d0f5a0d',
+      { access: localAccount },
+    )
+    const accessKeyClient = createClient({
+      account: accessKey,
+      transport: http('http://127.0.0.1'),
+    })
+
+    const result = await createVoucherPayload(
+      accessKeyClient,
+      accessKey,
+      channelId,
+      5_000_000n,
+      escrowContract,
+      chainId,
+    )
+
+    expect(result.action).toBe('voucher')
+    if (result.action !== 'voucher') throw new Error('unexpected action')
+
+    const envelope = SignatureEnvelope.from(result.signature as SignatureEnvelope.Serialized)
+    expect(envelope.type).toBe('secp256k1')
+
+    const valid = await verifyVoucher(
+      escrowContract,
+      chainId,
+      { channelId, cumulativeAmount: 5_000_000n, signature: result.signature },
+      accessKey.accessKeyAddress,
+    )
+    expect(valid).toBe(true)
+  })
 })
 
 describe('createClosePayload', () => {
@@ -231,8 +267,8 @@ describe.runIf(isLocalnet)('createOpenPayload', () => {
     expect((result.payload as any).authorizedSigner).toBe(payer.address)
   })
 
-  test('uses custom authorizedSigner when provided', async () => {
-    const customSigner = accounts[5].address
+  test('derives authorizedSigner from voucherSigner when provided', async () => {
+    const voucherSigner = accounts[5]
     const payerClient = createClient({
       account: payer,
       chain,
@@ -240,7 +276,7 @@ describe.runIf(isLocalnet)('createOpenPayload', () => {
     })
 
     const result = await createOpenPayload(payerClient, payer, {
-      authorizedSigner: customSigner,
+      voucherSigner,
       escrowContract: escrow,
       payee,
       currency,
@@ -249,7 +285,24 @@ describe.runIf(isLocalnet)('createOpenPayload', () => {
       chainId: chain.id,
     })
 
-    expect((result.payload as any).authorizedSigner).toBe(customSigner)
+    expect((result.payload as any).authorizedSigner).toBe(voucherSigner.address)
+
+    expect(result.payload.action).toBe('open')
+    if (result.payload.action !== 'open') throw new Error('unexpected action')
+
+    const transaction = Transaction.deserialize(result.payload.transaction)
+    if (!('calls' in transaction)) throw new Error('unexpected transaction type')
+    const calls = transaction.calls as readonly [
+      { to?: Address; data?: Hex.Hex },
+      { to?: Address; data?: Hex.Hex },
+    ]
+    const openCall = calls[1]
+    const open = decodeFunctionData({
+      abi: escrowAbi,
+      data: openCall?.data ?? '0x',
+    })
+    const openArgs = open.args as readonly [Address, Address, bigint, string, Address]
+    expect(openArgs[4].toLowerCase()).toBe(voucherSigner.address.toLowerCase())
   })
 })
 

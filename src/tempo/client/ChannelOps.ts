@@ -33,6 +33,18 @@ export type ChannelEntry = {
   opened: boolean
 }
 
+function getVoucherSignerAddress(account: viem_Account): Address {
+  return ((account as unknown as { accessKeyAddress?: Address | undefined }).accessKeyAddress ??
+    account.address) as Address
+}
+
+function resolveVoucherSigner(
+  account: viem_Account,
+  voucherSigner?: viem_Account | undefined,
+): viem_Account {
+  return voucherSigner ?? account
+}
+
 export function resolveChainId(challenge: Challenge): number {
   const md = challenge.request.methodDetails as { chainId?: number } | undefined
   return md?.chainId ?? 0
@@ -76,15 +88,16 @@ export async function createVoucherPayload(
   cumulativeAmount: bigint,
   escrowContract: Address,
   chainId: number,
-  authorizedSigner?: Address | undefined,
+  voucherSigner?: viem_Account | undefined,
 ): Promise<SessionCredentialPayload> {
+  const signer = resolveVoucherSigner(account, voucherSigner)
   const signature = await signVoucher(
     client,
     account,
     { channelId, cumulativeAmount },
     escrowContract,
     chainId,
-    authorizedSigner,
+    signer,
   )
   return {
     action: 'voucher',
@@ -101,15 +114,16 @@ export async function createClosePayload(
   cumulativeAmount: bigint,
   escrowContract: Address,
   chainId: number,
-  authorizedSigner?: Address | undefined,
+  voucherSigner?: viem_Account | undefined,
 ): Promise<SessionCredentialPayload> {
+  const signer = resolveVoucherSigner(account, voucherSigner)
   const signature = await signVoucher(
     client,
     account,
     { channelId, cumulativeAmount },
     escrowContract,
     chainId,
-    authorizedSigner,
+    signer,
   )
   return {
     action: 'close',
@@ -123,7 +137,7 @@ export async function createOpenPayload(
   client: viem_Client,
   account: viem_Account,
   options: {
-    authorizedSigner?: Address | undefined
+    voucherSigner?: viem_Account | undefined
     escrowContract: Address
     payee: Address
     currency: Address
@@ -134,7 +148,8 @@ export async function createOpenPayload(
   },
 ): Promise<{ entry: ChannelEntry; payload: SessionCredentialPayload }> {
   const { escrowContract, payee, currency, deposit, initialAmount, chainId, feePayer } = options
-  const authorizedSigner = options.authorizedSigner ?? account.address
+  const voucherSigner = resolveVoucherSigner(account, options.voucherSigner)
+  const authorizedSigner = getVoucherSignerAddress(voucherSigner)
 
   const salt = Hex.random(32)
   const channelId = Channel.computeId({
@@ -180,7 +195,7 @@ export async function createOpenPayload(
     { channelId, cumulativeAmount: initialAmount },
     escrowContract,
     chainId,
-    options.authorizedSigner,
+    voucherSigner,
   )
 
   return {

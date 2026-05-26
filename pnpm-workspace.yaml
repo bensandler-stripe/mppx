@@ -13,7 +13,7 @@ overrides:
   mppx: 'workspace:*'
   vitest: 'npm:@voidzero-dev/vite-plus-test@~0.1.17'
   typescript: '~5.9.3'
-  ox: '0.14.22'
+  ox: '0.14.24'
   viem: '^2.51.0'
   path-to-regexp@<8.4.0: '8.4.0'
   tar@<=7.5.10: '7.5.11'
@@ -52,4 +52,5 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - fast-uri@3.1.2
+  - ox@0.14.24
   - viem@2.51.0
