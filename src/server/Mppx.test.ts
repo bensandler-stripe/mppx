@@ -40,6 +40,31 @@ describe('create', () => {
 })
 
 describe('request handler', () => {
+  const mockCharge = Method.toServer(
+    Method.from({
+      name: 'mock',
+      intent: 'charge',
+      schema: {
+        credential: { payload: z.object({ token: z.string() }) },
+        request: z.object({
+          amount: z.string(),
+          currency: z.string(),
+          recipient: z.string(),
+        }),
+      },
+    }),
+    {
+      async verify() {
+        return {
+          method: 'mock',
+          reference: 'tx-ref',
+          status: 'success',
+          timestamp: new Date().toISOString(),
+        }
+      },
+    },
+  )
+
   test('returns 402 when no Authorization header', async () => {
     const handler = Mppx.create({ methods: [method], realm, secretKey })
 
@@ -72,6 +97,109 @@ describe('request handler', () => {
         "type": "https://paymentauth.org/problems/payment-required",
       }
     `)
+  })
+
+  test('credentialResolver can resolve a credential for no-credential requests', async () => {
+    const handler = Mppx.create({
+      methods: [mockCharge],
+      realm,
+      secretKey,
+      credentialResolver({ challenge, input, method, request }) {
+        expect(input).toBeInstanceOf(Request)
+        expect(method).toEqual({ intent: 'charge', name: 'mock' })
+        expect(request).toEqual({
+          amount: '1000',
+          currency: 'USD',
+          recipient: 'merchant',
+        })
+        return Credential.from({ challenge, payload: { token: 'api-key-payment' } })
+      },
+    })
+
+    const result = await handler.charge({
+      amount: '1000',
+      currency: 'USD',
+      expires: new Date(Date.now() + 60_000).toISOString(),
+      recipient: 'merchant',
+    })(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(200)
+    if (result.status !== 200) throw new Error()
+
+    const response = result.withReceipt(new Response('ok'))
+    expect(response.headers.get('Payment-Receipt')).toBeTruthy()
+  })
+
+  test('credentialResolver can return a serialized credential', async () => {
+    const handler = Mppx.create({
+      methods: [mockCharge],
+      realm,
+      secretKey,
+      credentialResolver({ challenge }) {
+        return Credential.serialize(
+          Credential.from({ challenge, payload: { token: 'serialized' } }),
+        )
+      },
+    })
+
+    const result = await handler.charge({
+      amount: '1000',
+      currency: 'USD',
+      expires: new Date(Date.now() + 60_000).toISOString(),
+      recipient: 'merchant',
+    })(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(200)
+  })
+
+  test('credentialResolver falls back to 402 when it returns nothing', async () => {
+    let called = false
+    const handler = Mppx.create({
+      methods: [mockCharge],
+      realm,
+      secretKey,
+      credentialResolver() {
+        called = true
+        return undefined
+      },
+    })
+
+    const result = await handler.charge({
+      amount: '1000',
+      currency: 'USD',
+      expires: new Date(Date.now() + 60_000).toISOString(),
+      recipient: 'merchant',
+    })(new Request('https://example.com/resource'))
+
+    expect(called).toBe(true)
+    expect(result.status).toBe(402)
+  })
+
+  test('credentialResolver is not called when Authorization provides a credential', async () => {
+    const handler = Mppx.create({
+      methods: [mockCharge],
+      realm,
+      secretKey,
+      credentialResolver() {
+        throw new Error('credentialResolver should not be called')
+      },
+    })
+    const options = {
+      amount: '1000',
+      currency: 'USD',
+      expires: new Date(Date.now() + 60_000).toISOString(),
+      recipient: 'merchant',
+    } as const
+    const challenge = await handler.challenge.mock.charge(options)
+    const credential = Credential.from({ challenge, payload: { token: 'authorization' } })
+
+    const result = await handler.charge(options)(
+      new Request('https://example.com/resource', {
+        headers: { Authorization: Credential.serialize(credential) },
+      }),
+    )
+
+    expect(result.status).toBe(200)
   })
 
   test('returns 402 with challenge for malformed credential', async () => {

@@ -151,6 +151,44 @@ export type VerifyCredentialOptions = {
 }
 
 /**
+ * Resolves a payment credential for a request that did not include one.
+ *
+ * Use this to support local authentication paths, such as API keys, while
+ * preserving the normal 402 fallback when no credential can be resolved.
+ */
+export type CredentialResolver<
+  method extends Method.Method = Method.Method,
+  transport extends Transport.AnyTransport = Transport.AnyTransport,
+> = (
+  context: CredentialResolver.Context<method, transport>,
+) => MaybePromise<
+  | Credential.Credential<
+      z.output<method['schema']['credential']['payload']>,
+      Challenge.Challenge<z.output<method['schema']['request']>, method['intent'], method['name']>
+    >
+  | string
+  | null
+  | undefined
+>
+
+export declare namespace CredentialResolver {
+  type Context<
+    method extends Method.Method = Method.Method,
+    transport extends Transport.AnyTransport = Transport.AnyTransport,
+  > = Readonly<{
+    capturedRequest?: Method.CapturedRequest | undefined
+    challenge: Challenge.Challenge<
+      z.output<method['schema']['request']>,
+      method['intent'],
+      method['name']
+    >
+    input: Transport.InputOf<transport>
+    method: ServerMethodDescriptor<method>
+    request: z.output<method['schema']['request']>
+  }>
+}
+
+/**
  * Payment handler.
  */
 export type Mppx<
@@ -395,6 +433,7 @@ export function create<
   const transport extends Transport.AnyTransport = Transport.Http,
 >(config: create.Config<methods, transport>): Mppx<methods, transport> {
   const {
+    credentialResolver,
     realm = Env.get('realm'),
     secretKey = Env.get('secretKey'),
     transport = Transport.http() as transport,
@@ -420,6 +459,7 @@ export function create<
   for (const mi of methods) {
     const fn = createMethodFn({
       authorize: mi.authorize as never,
+      credentialResolver: credentialResolver as never,
       defaults: mi.defaults,
       method: mi,
       realm,
@@ -736,6 +776,8 @@ export declare namespace create {
   > = {
     /** Array of configured methods. @example [tempo()] */
     methods: methods
+    /** Resolve a credential for no-credential requests before returning the default 402 challenge. */
+    credentialResolver?: CredentialResolver<FlattenMethods<methods>[number], transport> | undefined
     /** Server realm (e.g., hostname). Resolution order: explicit value > env vars (`MPP_REALM`, `FLY_APP_NAME`, `VERCEL_URL`, etc.) > request URL hostname > `"MPP Payment"`. */
     realm?: string | undefined
     /** Secret key for HMAC-bound challenge IDs for stateless verification. Auto-detected from `MPP_SECRET_KEY` environment variable. Throws if neither provided nor set. */
@@ -756,6 +798,7 @@ function createMethodFn<
 function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.ReturnType {
   const {
     authorize,
+    credentialResolver,
     defaults,
     events,
     method,
@@ -790,7 +833,7 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
             : staticMeta
 
         // Extract credential once — getCredential may have side effects (e.g. SSE transports).
-        const [credential, credentialError] = (() => {
+        let [credential, credentialError] = (() => {
           try {
             const credential = transport.getCredential(input) as Credential.Credential | null
             return [credential ? hydrateCredentialMeta(credential) : null, undefined] as const
@@ -958,6 +1001,41 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
                 response: response as never,
               }) as response
             },
+          }
+        }
+
+        if (!credential && credentialResolver) {
+          try {
+            const resolved = await credentialResolver({
+              capturedRequest,
+              challenge,
+              input,
+              method: { intent: method.intent, name: method.name },
+              request: parsedRequest,
+            } as never)
+            if (resolved)
+              credential = hydrateCredentialMeta(
+                typeof resolved === 'string' ? Credential.deserialize(resolved) : resolved,
+              )
+          } catch (e) {
+            if (!(e instanceof Errors.PaymentError))
+              console.error('mppx: internal credential resolver error', e)
+            const error =
+              e instanceof Errors.PaymentError ? e : new Errors.VerificationFailedError()
+            await emitPaymentFailed({
+              challenge,
+              credential: null,
+              error,
+              request: parsedRequest,
+              retryChallenge: challenge,
+            })
+            const response = await emitChallenge({
+              challenge,
+              request: parsedRequest,
+              error,
+              html: method.html,
+            })
+            return { challenge: response, status: 402 }
           }
         }
 
@@ -1285,6 +1363,7 @@ declare namespace createMethodFn {
     defaults extends Record<string, unknown> = Record<string, unknown>,
   > = {
     authorize?: Method.AuthorizeFn<method>
+    credentialResolver?: CredentialResolver<method, transport>
     defaults?: defaults
     method: method
     events: ServerEventDispatcher<readonly [method], transport>
