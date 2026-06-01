@@ -564,6 +564,9 @@ export function create<
       throw e
     }
 
+    // tempo.session bills open/voucher credentials only when the submitted
+    // request is a content request. Standalone verification has no transport
+    // input, so callers must provide the captured request snapshot explicitly.
     if (
       options?.capturedRequest === undefined &&
       requiresCapturedRequestForStandaloneVerify(parsedCredential)
@@ -1963,10 +1966,12 @@ function hydrateCredentialMeta<payload>(
 }
 
 function requiresCapturedRequestForStandaloneVerify(credential: Credential.Credential): boolean {
-  if (credential.challenge.method !== 'tempo') return false
-  if (credential.challenge.intent !== 'session') return false
   const action = (credential.payload as { action?: unknown }).action
-  return action === 'open' || action === 'voucher'
+  return (
+    credential.challenge.method === 'tempo' &&
+    credential.challenge.intent === 'session' &&
+    (action === 'open' || action === 'voucher')
+  )
 }
 
 function withParsedCredentialPayload<payload>(
