@@ -6,7 +6,9 @@ import {
   session as tempo_session_client,
   tempo as tempo_client,
 } from 'mppx/client'
-import { Mppx, stripe, Store, Transport, tempo } from 'mppx/server'
+import { Types as evm_Types } from 'mppx/evm'
+import { evm, Mppx, stripe, Store, Transport, tempo } from 'mppx/server'
+import { Header as x402_Header, Types as x402_Types, type PaymentPayload } from 'mppx/x402'
 import { getTransactionReceipt } from 'viem/actions'
 import { describe, expect, test } from 'vp/test'
 import * as Http from '~test/Http.js'
@@ -14,6 +16,7 @@ import { deployEscrow } from '~test/tempo/session.js'
 import { accounts, asset, client } from '~test/tempo/viem.js'
 
 import type { SessionReceipt } from '../tempo/session/Types.js'
+import * as x402_RouteBinding from '../x402/internal/RouteBinding.js'
 
 const realm = 'api.example.com'
 const secretKey = 'test-secret-key'
@@ -1855,6 +1858,29 @@ describe('compose', () => {
     },
   })
 
+  const x402Method = evm.charge({
+    currency: evm.assets.baseSepolia.USDC,
+    recipient: accounts[0].address,
+    x402: {
+      facilitator: {
+        async verify(paymentPayload: PaymentPayload) {
+          return {
+            isValid: true,
+            payer: payerOf(paymentPayload),
+          }
+        },
+        async settle(paymentPayload: PaymentPayload) {
+          return {
+            network: paymentPayload.accepted.network,
+            payer: payerOf(paymentPayload),
+            success: true,
+            transaction: `0x${'3'.repeat(64)}`,
+          }
+        },
+      },
+    },
+  })
+
   const challengeOpts = {
     amount: '1000',
     currency: '0x0000000000000000000000000000000000000001',
@@ -1879,6 +1905,142 @@ describe('compose', () => {
     expect(wwwAuth).toContain('method="beta"')
   })
 
+  test('returns composed x402 challenge headers when no credential', async () => {
+    const mppx = Mppx.create({ methods: [x402Method], realm, secretKey })
+
+    const result = await mppx.compose(['evm/charge', { amount: '0.01' }])(
+      new Request('https://example.com/resource'),
+    )
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+
+    expect(result.challenge.headers.get('WWW-Authenticate')).toContain('method="evm"')
+    const header = result.challenge.headers.get(x402_Types.paymentRequiredHeader)
+    expect(header).toBeTruthy()
+    expect(result.challenge.headers.get('Content-Type')).toContain('application/problem+json')
+    expect(await result.challenge.json()).toMatchObject({ status: 402 })
+
+    const paymentRequired = x402_Header.decodePaymentRequired(header!)
+    expect(paymentRequired.accepts).toHaveLength(1)
+    expect(paymentRequired.accepts[0]).toMatchObject({
+      amount: '10000',
+      scheme: x402_Types.schemes[0],
+    })
+    expect(paymentRequired.resource.url).toBe('https://example.com/resource')
+  })
+
+  test('merges Payment auth and x402 challenge headers in compose()', async () => {
+    const mppx = Mppx.create({ methods: [alphaMethod, x402Method], realm, secretKey })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      ['evm/charge', { amount: '0.01' }],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+
+    const wwwAuth = result.challenge.headers.get('WWW-Authenticate')
+    expect(wwwAuth).toContain('method="alpha"')
+
+    const header = result.challenge.headers.get(x402_Types.paymentRequiredHeader)
+    expect(header).toBeTruthy()
+    const paymentRequired = x402_Header.decodePaymentRequired(header!)
+    expect(paymentRequired.accepts.map((accepted) => accepted.amount)).toEqual(['10000'])
+  })
+
+  test('keeps pure x402 challenge headers when Payment auth challenges are present', async () => {
+    const mppx = Mppx.create({ methods: [alphaMethod], realm, secretKey })
+    const pureX402 = async () =>
+      ({
+        status: 402,
+        challenge: new Response('{}', {
+          status: 402,
+          headers: {
+            [x402_Types.paymentRequiredHeader]: x402_Header.encodePaymentRequired({
+              accepts: [
+                {
+                  amount: '10000',
+                  asset: evm.assets.baseSepolia.USDC.address,
+                  extra: {
+                    assetTransferMethod: evm_Types.eip3009,
+                    name: 'USDC',
+                    version: '2',
+                  },
+                  maxTimeoutSeconds: 300,
+                  network: 'eip155:84532',
+                  payTo: accounts[0].address,
+                  scheme: 'exact',
+                },
+              ],
+              resource: { url: 'https://example.com/resource' },
+              x402Version: 2,
+            }),
+          },
+        }),
+      }) as const
+
+    const alpha = (mppx as unknown as Record<string, (options: unknown) => any>)['alpha/charge']!(
+      challengeOpts,
+    )
+
+    const result = await Mppx.compose(alpha, pureX402)(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+
+    expect(result.challenge.headers.get('WWW-Authenticate')).toContain('method="alpha"')
+    expect(result.challenge.headers.get(x402_Types.paymentRequiredHeader)).toBeTruthy()
+  })
+
+  test('merges multiple x402 exact offers in compose()', async () => {
+    const mppx = Mppx.create({ methods: [x402Method], realm, secretKey })
+
+    const result = await mppx.compose(
+      ['evm/charge', { amount: '0.01' }],
+      ['evm/charge', { amount: '0.02' }],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+
+    const header = result.challenge.headers.get(x402_Types.paymentRequiredHeader)
+    expect(header).toBeTruthy()
+    const paymentRequired = x402_Header.decodePaymentRequired(header!)
+    expect(paymentRequired.accepts.map((accepted) => accepted.amount)).toEqual(['10000', '20000'])
+  })
+
+  test('dispatches x402 credentials through compose()', async () => {
+    const mppx = Mppx.create({ methods: [alphaMethod, x402Method], realm, secretKey })
+    const handle = mppx.compose([alphaMethod, challengeOpts], ['evm/charge', { amount: '0.01' }])
+
+    const firstResult = await handle(new Request('https://example.com/resource'))
+    expect(firstResult.status).toBe(402)
+    if (firstResult.status !== 402) throw new Error()
+
+    const paymentRequired = x402_Header.decodePaymentRequired(
+      firstResult.challenge.headers.get(x402_Types.paymentRequiredHeader)!,
+    )
+    const credential = await x402PaymentSignature(
+      paymentRequired.accepts[0]!,
+      paymentRequired.resource,
+      paymentRequired.extensions,
+    )
+
+    const result = await handle(
+      new Request('https://example.com/resource', {
+        headers: { [x402_Types.paymentSignatureHeader]: credential },
+      }),
+    )
+
+    expect(result.status).toBe(200)
+    if (result.status !== 200) throw new Error()
+    const response = result.withReceipt(new Response('paid'))
+    expect(response.headers.get(x402_Types.paymentResponseHeader)).toBeTruthy()
+    expect(await response.text()).toBe('paid')
+  })
+
   test('filters compose challenges using Accept-Payment', async () => {
     const mppx = Mppx.create({ methods: [alphaMethod, betaMethod], realm, secretKey })
 
@@ -1897,6 +2059,27 @@ describe('compose', () => {
     const challenges = Challenge.fromResponseList(result.challenge)
     expect(challenges).toHaveLength(1)
     expect(challenges[0]?.method).toBe('beta')
+  })
+
+  test('filters compose x402 challenge headers using Accept-Payment', async () => {
+    const mppx = Mppx.create({ methods: [alphaMethod, x402Method], realm, secretKey })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      ['evm/charge', { amount: '0.01' }],
+    )(
+      new Request('https://example.com/resource', {
+        headers: { 'Accept-Payment': 'alpha/charge' },
+      }),
+    )
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+
+    const challenges = Challenge.fromResponseList(result.challenge)
+    expect(challenges).toHaveLength(1)
+    expect(challenges[0]?.method).toBe('alpha')
+    expect(result.challenge.headers.get(x402_Types.paymentRequiredHeader)).toBeNull()
   })
 
   test('orders compose challenges by Accept-Payment q-value', async () => {
@@ -2521,6 +2704,66 @@ describe('compose', () => {
     })
   })
 })
+
+async function x402PaymentSignature(
+  accepted: x402_Types.PaymentRequirements,
+  resource: x402_Types.ResourceInfo,
+  extensions: x402_Types.Extensions | undefined,
+): Promise<string> {
+  const authorization = {
+    from: accounts[0].address,
+    nonce: x402_RouteBinding.nonce({
+      accepted,
+      extensions: extensions!,
+      resource,
+    }),
+    to: accepted.payTo as `0x${string}`,
+    validAfter: '0',
+    validBefore: '9999999999',
+    value: accepted.amount,
+  }
+  const signature = await accounts[0].signTypedData({
+    domain: {
+      chainId: Number(accepted.network.slice(x402_Types.evmNetworkPrefix.length)),
+      name: accepted.extra?.name as string,
+      verifyingContract: accepted.asset as `0x${string}`,
+      version: accepted.extra?.version as string,
+    },
+    message: {
+      ...authorization,
+      validAfter: BigInt(authorization.validAfter),
+      validBefore: BigInt(authorization.validBefore),
+      value: BigInt(authorization.value),
+    },
+    primaryType: 'TransferWithAuthorization',
+    types: {
+      TransferWithAuthorization: [
+        { name: 'from', type: 'address' },
+        { name: 'to', type: 'address' },
+        { name: 'value', type: 'uint256' },
+        { name: 'validAfter', type: 'uint256' },
+        { name: 'validBefore', type: 'uint256' },
+        { name: 'nonce', type: 'bytes32' },
+      ],
+    },
+  })
+
+  return x402_Header.encodePaymentSignature({
+    accepted,
+    ...(extensions ? { extensions } : {}),
+    payload: {
+      authorization,
+      signature,
+    },
+    resource,
+    x402Version: 2,
+  })
+}
+
+function payerOf(paymentPayload: PaymentPayload): string {
+  if ('authorization' in paymentPayload.payload) return paymentPayload.payload.authorization.from
+  return paymentPayload.payload.permit2Authorization.from
+}
 
 describe('compose: pre-dispatch narrowing edge cases', () => {
   const mockCharge = Method.from({

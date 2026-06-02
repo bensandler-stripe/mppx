@@ -11,6 +11,8 @@ import type { MaybePromise } from '../internal/types.js'
 import type * as Method from '../Method.js'
 import * as PaymentRequest from '../PaymentRequest.js'
 import type * as Receipt from '../Receipt.js'
+import * as x402_Header from '../x402/Header.js'
+import * as x402_Types from '../x402/Types.js'
 import * as z from '../zod.js'
 import * as Html from './internal/html/config.js'
 import { serviceWorker } from './internal/html/serviceWorker.gen.js'
@@ -790,7 +792,7 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
             : staticMeta
 
         // Extract credential once — getCredential may have side effects (e.g. SSE transports).
-        const [credential, credentialError] = (() => {
+        let [credential, credentialError] = (() => {
           try {
             const credential = transport.getCredential(input) as Credential.Credential | null
             return [credential ? hydrateCredentialMeta(credential) : null, undefined] as const
@@ -897,6 +899,21 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
         })
         if ('response' in routeChallenge) return { challenge: routeChallenge.response, status: 402 }
         const { challenge, parsedRequest, request } = routeChallenge
+
+        if (credential && transport.bindCredential) {
+          try {
+            credential = hydrateCredentialMeta(
+              (await transport.bindCredential({
+                challenge,
+                credential,
+                input,
+              })) as Credential.Credential,
+            )
+          } catch (e) {
+            credential = null
+            credentialError = e as Error
+          }
+        }
 
         // Credential was provided but malformed
         if (credentialError) {
@@ -2004,6 +2021,29 @@ type ConfiguredHandler = ((input: Request) => Promise<MethodFn.Response<Transpor
   }
 }
 
+const paymentAuthChallengeHeader = 'WWW-Authenticate'
+
+const challengeHeaderMerges = [
+  {
+    name: paymentAuthChallengeHeader,
+    values: (context) =>
+      context.challengeEntries
+        .map((entry) =>
+          (entry.result.challenge as Response).headers.get(paymentAuthChallengeHeader),
+        )
+        .filter((value): value is string => value !== null),
+    merge: (values) => values,
+  },
+  {
+    name: x402_Types.paymentRequiredHeader,
+    values: (context) =>
+      context.negotiatedChallengeResponses
+        .map((response) => response.headers.get(x402_Types.paymentRequiredHeader))
+        .filter((value): value is string => value !== null),
+    merge: mergeX402PaymentRequiredHeaders,
+  },
+] satisfies readonly ChallengeHeaderMerge[]
+
 /** An entry for `compose()`: a method reference, handler function ref, or string key paired with its options. */
 type ComposeEntry<methods extends readonly Method.AnyServer[]> =
   | {
@@ -2172,7 +2212,7 @@ export function compose(
         if (result?.status !== 402) continue
 
         const response = result.challenge as Response
-        const wwwAuth = response.headers.get('WWW-Authenticate')
+        const wwwAuth = response.headers.get(paymentAuthChallengeHeader)
         if (!wwwAuth) continue
 
         entries.push({
@@ -2199,14 +2239,39 @@ export function compose(
       }
     })()
 
-    // Merge WWW-Authenticate headers from all 402 responses.
+    const challengeResponses = results.flatMap((result) =>
+      result.status === 402 ? [result.challenge as Response] : [],
+    )
+    const unnegotiatedX402Responses =
+      input.headers.has('Accept-Payment') || challengeEntries.length === 0
+        ? []
+        : challengeResponses.filter(
+            (response) =>
+              response.headers.has(x402_Types.paymentRequiredHeader) &&
+              !response.headers.has(paymentAuthChallengeHeader),
+          )
+    const negotiatedChallengeResponses =
+      challengeEntries.length > 0
+        ? [
+            ...challengeEntries.map((entry) => entry.result.challenge as Response),
+            ...unnegotiatedX402Responses,
+          ]
+        : challengeResponses
+
+    // Merge challenge headers from the negotiated 402 responses.
     const mergedHeaders = new Headers()
     mergedHeaders.set('Cache-Control', 'no-store')
 
-    for (const entry of challengeEntries) {
-      const response = entry.result.challenge as Response
-      const wwwAuth = response.headers.get('WWW-Authenticate')
-      if (wwwAuth) mergedHeaders.append('WWW-Authenticate', wwwAuth)
+    for (const header of challengeHeaderMerges) {
+      for (const value of header.merge(
+        header.values({
+          challengeEntries,
+          challengeResponses,
+          negotiatedChallengeResponses,
+        }),
+      )) {
+        mergedHeaders.append(header.name, value)
+      }
     }
 
     // Collect html-enabled handlers and their challenges
@@ -2257,11 +2322,15 @@ export function compose(
       }
     }
 
-    // Non-HTML fallback: use first handler's body
+    // Non-HTML fallback: prefer the first Payment-auth body, otherwise use
+    // the first transport-specific 402 body.
     let body: string | null = null
-    for (const entry of challengeEntries) {
+    const bodyResponses =
+      challengeEntries.length > 0
+        ? challengeEntries.map((entry) => entry.result.challenge as Response)
+        : challengeResponses
+    for (const response of bodyResponses) {
       if (!body) {
-        const response = entry.result.challenge as Response
         const contentType = response.headers.get('Content-Type')
         if (contentType) mergedHeaders.set('Content-Type', contentType)
         body = await response.text()
@@ -2274,6 +2343,50 @@ export function compose(
       challenge: new Response(body, { status: 402, headers: mergedHeaders }),
     }
   }
+}
+
+type ChallengeHeaderMerge = {
+  name: string
+  values(context: {
+    challengeEntries: readonly {
+      handler: ConfiguredHandler
+      challenge: Challenge.Challenge
+      result: Extract<MethodFn.Response<Transport.Http>, { status: 402 }>
+    }[]
+    challengeResponses: readonly Response[]
+    negotiatedChallengeResponses: readonly Response[]
+  }): readonly string[]
+  merge(values: readonly string[]): readonly string[]
+}
+
+function mergeX402PaymentRequiredHeaders(values: readonly string[]): readonly string[] {
+  if (values.length === 0) return []
+  const [first, ...rest] = values.map((value) => x402_Header.decodePaymentRequired(value))
+  if (!first) throw new Error('Expected at least one x402 payment-required header.')
+  const incompatible = rest.some(
+    (value) =>
+      !isDeepStrictEqual(value.resource, first.resource) ||
+      !isDeepStrictEqual(value.extensions, first.extensions),
+  )
+  if (incompatible)
+    return [
+      x402_Header.encodePaymentRequired({
+        ...first,
+        error: [first.error, 'Cannot merge x402 payment requirements with different resources.']
+          .filter((value): value is string => value !== undefined && value.length > 0)
+          .join('; '),
+      }),
+    ]
+  const error = [first.error, ...rest.map((value) => value.error)]
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .join('; ')
+  return [
+    x402_Header.encodePaymentRequired({
+      ...first,
+      accepts: [first.accepts, ...rest.map((value) => value.accepts)].flat(),
+      ...(error ? { error } : {}),
+    }),
+  ]
 }
 
 /**
@@ -2316,7 +2429,7 @@ export function toNodeListener(
       }
 
       const wrapped = result.withReceipt(new globalThis.Response()) as globalThis.Response
-      res.setHeader('Payment-Receipt', wrapped.headers.get('Payment-Receipt')!)
+      for (const [name, value] of wrapped.headers) res.setHeader(name, value)
     }
 
     return result

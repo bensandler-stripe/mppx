@@ -27,6 +27,18 @@ export type Transport<
   /** Captures the transport request into an immutable verification snapshot. */
   captureRequest?: ((input: input) => MaybePromise<Method.CapturedRequest>) | undefined
   /**
+   * Rebinds a transport-native credential to the route challenge after request
+   * normalization. Transports with non-Payment-auth wire formats can parse their
+   * payload early, then attach the canonical mppx challenge here.
+   */
+  bindCredential?:
+    | ((options: {
+        challenge: Challenge.Challenge
+        credential: Credential.Credential
+        input: input
+      }) => MaybePromise<Credential.Credential>)
+    | undefined
+  /**
    * Extracts credential from the transport input.
    * Returns `null` if no credential was provided, or throws if malformed.
    */
@@ -196,6 +208,7 @@ export function http(): Http {
 
     respondReceipt({ receipt, response }) {
       const headers = new Headers(response.headers)
+      headers.set('Cache-Control', withPrivateCacheControl(headers.get('Cache-Control')))
       headers.set('Payment-Receipt', Receipt.serialize(receipt))
       return new Response(response.body, {
         status: response.status,
@@ -204,6 +217,13 @@ export function http(): Http {
       })
     },
   })
+}
+
+function withPrivateCacheControl(value: string | null): string {
+  if (!value) return 'private'
+  const directives = value.split(',').map((directive) => directive.trim().toLowerCase())
+  if (directives.includes('private')) return value
+  return `${value}, private`
 }
 
 /**

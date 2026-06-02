@@ -1,9 +1,20 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { Challenge, Credential, Method, Receipt, z } from 'mppx'
-import { Mppx as Mppx_client, session as sessionIntent, tempo as tempo_client } from 'mppx/client'
+import {
+  evm as evm_client,
+  Mppx as Mppx_client,
+  session as sessionIntent,
+  tempo as tempo_client,
+} from 'mppx/client'
 import { Mppx, discovery, payment } from 'mppx/hono'
-import { tempo as tempo_server } from 'mppx/server'
+import { evm as evm_server, Mppx as ServerMppx, tempo as tempo_server } from 'mppx/server'
+import {
+  paymentRequiredHeader,
+  paymentResponseHeader,
+  paymentSignatureHeader,
+  type PaymentPayload,
+} from 'mppx/x402'
 import type { Address } from 'viem'
 import { Addresses } from 'viem/tempo'
 import { beforeAll, describe, expect, test } from 'vp/test'
@@ -50,6 +61,30 @@ describe('payment', () => {
     expect(response.headers.get('Payment-Receipt')).toBe('management-receipt')
     expect(await response.text()).toBe('')
     expect(handlerRan).toBe(false)
+
+    server.close()
+  })
+
+  test('copies transport-specific success headers', async () => {
+    const intent = () => async () => ({
+      status: 200 as const,
+      withReceipt: (response?: Response) =>
+        new Response(response?.body ?? null, {
+          headers: {
+            ...(response ? Object.fromEntries(response.headers) : {}),
+            'PAYMENT-RESPONSE': 'x402-response',
+          },
+          status: response?.status ?? 200,
+        }),
+    })
+
+    const app = new Hono()
+    app.get('/', payment(intent as any, {} as any), (c) => c.json({ data: 'content' }))
+
+    const server = await createServer(app)
+    const response = await globalThis.fetch(server.url)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('PAYMENT-RESPONSE')).toBe('x402-response')
 
     server.close()
   })
@@ -187,7 +222,108 @@ describe('charge', () => {
 
     server.close()
   })
+
+  test('serves tempo and x402 from one Hono endpoint', async () => {
+    const transaction = `0x${'2'.repeat(64)}` as const
+    const payments = ServerMppx.create({
+      methods: [
+        tempo_server.charge({
+          account: accounts[0],
+          currency: asset,
+          getClient: () => client,
+          recipient: accounts[0].address,
+        }),
+        evm_server.charge({
+          currency: evm_server.assets.baseSepolia.USDC,
+          recipient: accounts[0].address,
+          x402: {
+            facilitator: {
+              async verify(paymentPayload: PaymentPayload) {
+                return {
+                  isValid: true,
+                  payer: payerOf(paymentPayload),
+                }
+              },
+              async settle(paymentPayload: PaymentPayload) {
+                return {
+                  network: paymentPayload.accepted.network,
+                  payer: payerOf(paymentPayload),
+                  success: true,
+                  transaction,
+                }
+              },
+            },
+          },
+        }),
+      ],
+      secretKey,
+    })
+
+    const route = payments.compose(
+      [payments.tempo.charge, { amount: '0', chainId: client.chain!.id }],
+      [payments.evm.charge, { amount: '0.01' }],
+    )
+
+    const app = new Hono()
+    app.get('/paid', async (c) => {
+      const result = await route(c.req.raw)
+      if (result.status === 402) return result.challenge
+      return result.withReceipt(c.json({ data: 'paid' }))
+    })
+
+    const server = await createServer(app)
+    const challenge = await globalThis.fetch(`${server.url}/paid`)
+    expect(challenge.status).toBe(402)
+    expect(challenge.headers.get('WWW-Authenticate')).toContain('Payment')
+    expect(challenge.headers.get(paymentRequiredHeader)).toBeTruthy()
+
+    const tempoPayment = Mppx_client.create({
+      methods: [
+        tempo_client.charge({
+          account: accounts[0],
+          getClient: () => client,
+        }),
+      ],
+      polyfill: false,
+    })
+    const tempoResponse = await tempoPayment.fetch(`${server.url}/paid`)
+    expect(tempoResponse.status).toBe(200)
+    expect(await tempoResponse.json()).toEqual({ data: 'paid' })
+    expect(tempoResponse.headers.get('Payment-Receipt')).toBeTruthy()
+
+    const x402Payment = Mppx_client.create({
+      methods: [
+        evm_client.charge({
+          account: accounts[0],
+        }),
+      ],
+      polyfill: false,
+    })
+    const paymentSignature = await x402Payment.createCredential(pureX402Challenge(challenge))
+    const x402Response = await x402Payment.rawFetch(`${server.url}/paid`, {
+      headers: { [paymentSignatureHeader]: paymentSignature },
+    })
+    expect(x402Response.status).toBe(200)
+    expect(await x402Response.json()).toEqual({ data: 'paid' })
+    expect(x402Response.headers.get(paymentResponseHeader)).toBeTruthy()
+
+    server.close()
+  })
 })
+
+function payerOf(paymentPayload: PaymentPayload): string {
+  if ('authorization' in paymentPayload.payload) return paymentPayload.payload.authorization.from
+  return paymentPayload.payload.permit2Authorization.from
+}
+
+function pureX402Challenge(response: Response): Response {
+  const paymentRequired = response.headers.get(paymentRequiredHeader)
+  if (!paymentRequired) throw new Error('Missing PAYMENT-REQUIRED header.')
+  return new Response(null, {
+    headers: { [paymentRequiredHeader]: paymentRequired },
+    status: 402,
+  })
+}
 
 describe('scope binding', () => {
   const scopeOpts = {

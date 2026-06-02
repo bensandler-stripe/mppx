@@ -665,8 +665,8 @@ describe('Fetch.from: 402 retry path', () => {
     await fetch('https://example.com/api')
 
     const retryInit = calls[1]!.init as Record<string, unknown>
-    const headers = retryInit.headers as Record<string, string>
-    expect(headers.Authorization).toBe('credential')
+    const headers = new Headers(retryInit.headers as HeadersInit)
+    expect(headers.get('Authorization')).toBe('credential')
   })
 
   test('sends credential retry to the final 402 response URL', async () => {
