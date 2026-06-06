@@ -4302,7 +4302,7 @@ describe.runIf(isLocalnet)('session', () => {
 
       if (result.status === 200) {
         // async generator function should be accepted and return Response
-        const response = result.withReceipt(async function* (_stream) {
+        const response = result.withReceipt(async function* (_stream: unknown) {
           yield 'token'
         })
         expectTypeOf(response).toEqualTypeOf<Response>()
@@ -4389,7 +4389,7 @@ describe.runIf(isLocalnet)('session', () => {
         }
 
         if (request.headers.get('Accept')?.includes('text/event-stream')) {
-          return result.withReceipt(async function* (stream) {
+          return result.withReceipt(async function* (stream: { charge(): Promise<void> }) {
             await stream.charge()
             yield 'chunk-1'
             await stream.charge()
@@ -4635,7 +4635,7 @@ describe.runIf(isLocalnet)('session', () => {
         }
 
         if (request.headers.get('Accept')?.includes('text/event-stream')) {
-          return result.withReceipt(async function* (stream) {
+          return result.withReceipt(async function* (stream: { charge(): Promise<void> }) {
             await stream.charge()
             yield 'chunk-1'
             await stream.charge()
@@ -4694,7 +4694,7 @@ describe.runIf(isLocalnet)('session', () => {
         if (result.status === 402) return result.challenge
 
         if (request.headers.get('Accept')?.includes('text/event-stream')) {
-          return result.withReceipt(async function* (stream) {
+          return result.withReceipt(async function* (stream: { charge(): Promise<void> }) {
             await stream.charge()
             yield 'chunk-1'
             await stream.charge()
