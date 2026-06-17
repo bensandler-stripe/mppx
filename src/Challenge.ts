@@ -7,6 +7,8 @@ import type * as Method from './Method.js'
 import * as PaymentRequest from './PaymentRequest.js'
 import * as z from './zod.js'
 
+const maxRequestParameterLength = 16 * 1024
+
 /**
  * Schema for a payment challenge.
  *
@@ -347,6 +349,7 @@ export function deserialize<const methods extends readonly Method.Method[] | und
 
   const { request, opaque, ...rest } = result
   if (!request) throw new Error('Missing request parameter.')
+  if (request.length > maxRequestParameterLength) throw new Error('Request parameter too large.')
   if (rest.method && !/^[a-z][a-z0-9:_-]*$/.test(rest.method))
     throw new Error(`Invalid method: "${rest.method}". Must be lowercase per spec.`)
 
@@ -441,26 +444,36 @@ function readQuotedAuthParamValue(
   start: number,
 ): [value: string, nextIndex: number] {
   let i = start
-  let value = ''
   let escaped = false
+  let segmentStart = start
+  let parts: string[] | undefined
 
   while (i < input.length) {
     const char = input[i]!
     i++
 
     if (escaped) {
-      value += char
+      parts ??= []
+      parts.push(char)
+      segmentStart = i
       escaped = false
       continue
     }
 
     if (char === '\\') {
+      parts ??= []
+      parts.push(input.slice(segmentStart, i - 1))
+      segmentStart = i
       escaped = true
       continue
     }
 
-    if (char === '"') return [value, i]
-    value += char
+    if (char === '"') {
+      const value = parts
+        ? [...parts, input.slice(segmentStart, i - 1)].join('')
+        : input.slice(start, i - 1)
+      return [value, i]
+    }
   }
 
   throw new Error('Unterminated quoted-string.')

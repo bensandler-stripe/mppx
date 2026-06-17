@@ -65,6 +65,8 @@ export async function handler(request: Request) {
 }
 ```
 
+Generate `MPP_SECRET_KEY` with at least 32 bytes, for example: `openssl rand -base64 32`.
+
 ### Client
 
 ```ts
