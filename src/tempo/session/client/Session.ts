@@ -11,13 +11,25 @@ import * as Methods from '../../Methods.js'
 import { serializeCredential, type ChannelEntry } from './ChannelOps.js'
 import { sessionContextSchema } from './CredentialState.js'
 import {
-  createChannelCache,
+  createChannelStore,
   executeCredentialPlan,
   planCredential,
   resolveChallengeContext,
+  type ChannelStore,
 } from './CredentialState.js'
 
-export { sessionContextSchema, type SessionContext } from './CredentialState.js'
+export {
+  createChannelStore,
+  createJsonChannelStore,
+  deserializeEntry,
+  entryKey,
+  sessionContextSchema,
+  serializeEntry,
+  type ChannelStore,
+  type JsonChannelKv,
+  type SessionContext,
+  type StoredChannel,
+} from './CredentialState.js'
 
 /**
  * Creates the low-level TIP-1034 session payment method for use with `Mppx.create()`.
@@ -30,6 +42,7 @@ export function session(parameters: session.Parameters = {}) {
   const {
     account,
     authorizedSigner,
+    channelStore,
     decimals = defaults.decimals,
     escrow: escrowOverride,
     getClient: getClientParameter,
@@ -44,7 +57,8 @@ export function session(parameters: session.Parameters = {}) {
   const getAccount = Account.getResolver({ account })
   const maxDeposit =
     maxDepositParameter !== undefined ? parseUnits(maxDepositParameter, decimals) : undefined
-  const cache = createChannelCache(onChannelUpdate)
+  const store = channelStore ?? createChannelStore()
+  const sink = { store, notifyUpdate: (entry: ChannelEntry) => onChannelUpdate?.(entry) }
   // Positive-only memo of accounts/chains that already passed the wallet MPP
   // capability probe, so a supporting wallet is probed once per instance.
   const probeCache = new Map<string, true>()
@@ -73,7 +87,8 @@ export function session(parameters: session.Parameters = {}) {
         context?.action !== undefined ||
         context?.descriptor !== undefined ||
         context?.channelId !== undefined
-      const openedLocally = cache.channels.get(resolved.key)?.opened
+      const entry = await store.get(resolved.key)
+      const openedLocally = entry?.opened
 
       // Wallet-native MPP: ask a JSON-RPC wallet to satisfy automatic-mode
       // challenges via `wallet_authorizeChallenge` before falling back to local planning.
@@ -91,13 +106,13 @@ export function session(parameters: session.Parameters = {}) {
         planCredential({
           account,
           authorizedSigner,
-          cache,
+          entry,
           context,
           decimals,
           maxDeposit,
           resolved,
         }),
-        cache,
+        sink,
       )
       return serializeCredential(challenge, payload, resolved.chainId, account)
     },
@@ -110,6 +125,8 @@ export declare namespace session {
     Client.getResolver.Parameters & {
       /** Address authorized to sign vouchers on behalf of the payer. Defaults to the account access key address when available, otherwise the account address. */
       authorizedSigner?: Address | undefined
+      /** Pluggable persistence for reusable channels. Defaults to an in-memory store. */
+      channelStore?: ChannelStore | undefined
       /** Token decimals for parsing human-readable amounts (default: 6). */
       decimals?: number | undefined
       /** TIP20EscrowChannel address override. */
