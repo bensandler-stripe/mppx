@@ -15,6 +15,10 @@ import {
   createJsonChannelStore,
   deserializeEntry,
   entryKey,
+  serializeEntry,
+  type ChannelSink,
+} from './ChannelStore.js'
+import {
   executeCredentialPlan,
   hasCredentialCumulativeAmount,
   hasManualSessionDescriptor,
@@ -28,10 +32,8 @@ import {
   resolveRecoveredCumulative,
   resolveRecoverContext,
   resolveReusableChannel,
-  serializeEntry,
   sessionContextSchema,
   type ChallengeContext,
-  type ChannelSink,
   type SessionContext,
 } from './CredentialState.js'
 

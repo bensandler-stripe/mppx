@@ -8,12 +8,8 @@ import type * as Account from '../../../viem/Account.js'
 import type * as Client from '../../../viem/Client.js'
 import { charge as chargePlugin } from '../../client/Charge.js'
 import type { ChannelEntry } from '../client/ChannelOps.js'
-import {
-  createChannelStore,
-  entryKey,
-  type ChannelStore,
-  type SessionContext,
-} from '../client/CredentialState.js'
+import { createChannelStore, entryKey, type ChannelStore } from '../client/ChannelStore.js'
+import type { SessionContext } from '../client/CredentialState.js'
 import { session as sessionPlugin } from '../client/Session.js'
 import { deserializeSessionReceipt } from '../precompile/Protocol.js'
 import { readSessionChallengeAmount, type SessionReceipt } from '../precompile/Protocol.js'

@@ -9,27 +9,15 @@ import * as defaults from '../../internal/defaults.js'
 import * as Wallet from '../../internal/wallet.js'
 import * as Methods from '../../Methods.js'
 import { serializeCredential, type ChannelEntry } from './ChannelOps.js'
-import { sessionContextSchema } from './CredentialState.js'
+import { createChannelStore, type ChannelStore } from './ChannelStore.js'
 import {
-  createChannelStore,
   executeCredentialPlan,
   planCredential,
   resolveChallengeContext,
-  type ChannelStore,
+  sessionContextSchema,
 } from './CredentialState.js'
 
-export {
-  createChannelStore,
-  createJsonChannelStore,
-  deserializeEntry,
-  entryKey,
-  sessionContextSchema,
-  serializeEntry,
-  type ChannelStore,
-  type JsonChannelKv,
-  type SessionContext,
-  type StoredChannel,
-} from './CredentialState.js'
+export { sessionContextSchema, type SessionContext } from './CredentialState.js'
 
 /**
  * Creates the low-level TIP-1034 session payment method for use with `Mppx.create()`.

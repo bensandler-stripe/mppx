@@ -17,6 +17,6 @@ export {
   entryKey,
   type ChannelStore,
   type JsonChannelKv,
-} from '../tempo/session/client/Session.js'
+} from '../tempo/session/client/ChannelStore.js'
 export * as Mppx from './Mppx.js'
 export * as Transport from './Transport.js'

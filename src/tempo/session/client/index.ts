@@ -11,7 +11,7 @@ export {
   type ChannelStore,
   type JsonChannelKv,
   type StoredChannel,
-} from './Session.js'
+} from './ChannelStore.js'
 /** Public client session manager types. */
 export type {
   PaymentResponse,
