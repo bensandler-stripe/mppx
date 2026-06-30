@@ -174,6 +174,20 @@ describe('PaymentRequiredError', () => {
         }
       `)
   })
+
+  test('toProblemDetails includes hint', () => {
+    const error = new PaymentRequiredError({ description: 'API access fee' })
+    expect(error.toProblemDetails('ch_abc')).toMatchInlineSnapshot(`
+      {
+        "challengeId": "ch_abc",
+        "detail": "Payment is required (API access fee).",
+        "hint": "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md",
+        "status": 402,
+        "title": "Payment Required",
+        "type": "https://paymentauth.org/problems/payment-required",
+      }
+    `)
+  })
 })
 
 describe('InvalidPayloadError', () => {
@@ -273,6 +287,19 @@ describe('PaymentMethodUnsupportedError', () => {
           "type": "https://paymentauth.org/problems/method-unsupported",
         }
       `)
+  })
+
+  test('toProblemDetails includes hint', () => {
+    const error = new PaymentMethodUnsupportedError({ method: 'bitcoin' })
+    expect(error.toProblemDetails()).toMatchInlineSnapshot(`
+      {
+        "detail": "Payment method "bitcoin" is not supported.",
+        "hint": "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md",
+        "status": 400,
+        "title": "Method Unsupported",
+        "type": "https://paymentauth.org/problems/method-unsupported",
+      }
+    `)
   })
 })
 
@@ -447,6 +474,7 @@ describe('toProblemDetails', () => {
     expect(error.toProblemDetails()).toMatchInlineSnapshot(`
       {
         "detail": "Credential is malformed: invalid JSON.",
+        "hint": "Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md",
         "status": 402,
         "title": "Malformed Credential",
         "type": "https://paymentauth.org/problems/malformed-credential",
