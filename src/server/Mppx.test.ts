@@ -87,6 +87,7 @@ describe('request handler', () => {
       {
         "challengeId": "[challengeId]",
         "detail": "Payment is required.",
+        "hint": "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md",
         "instance": "[instance]",
         "status": 402,
         "title": "Payment Required",
@@ -119,6 +120,7 @@ describe('request handler', () => {
       {
         "challengeId": "[challengeId]",
         "detail": "Credential is malformed: Invalid base64url or JSON..",
+        "hint": "Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md",
         "instance": "[instance]",
         "status": 402,
         "title": "Malformed Credential",
@@ -806,6 +808,7 @@ describe('request handler (node)', () => {
       {
         "challengeId": "[challengeId]",
         "detail": "Payment is required.",
+        "hint": "Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md",
         "instance": "[instance]",
         "status": 402,
         "title": "Payment Required",

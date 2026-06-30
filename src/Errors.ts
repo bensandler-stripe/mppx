@@ -1,3 +1,13 @@
+/** Default hint messages for payment errors. */
+export const Hints = {
+  paymentRequired:
+    'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md',
+  malformedCredential:
+    'Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md',
+  methodUnsupported:
+    'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md',
+} as const
+
 /**
  * Base class for all payment-related errors.
  */
@@ -11,6 +21,9 @@ export abstract class PaymentError extends Error {
   /** HTTP status code. */
   readonly status: number = 402
 
+  /** Actionable hint for resolving the error (RFC 9457 extension member). */
+  readonly hint: string | undefined
+
   /** Converts the error to RFC 9457 Problem Details format. */
   toProblemDetails(challengeId?: string): PaymentError.ProblemDetails {
     return {
@@ -18,6 +31,7 @@ export abstract class PaymentError extends Error {
       title: this.title,
       status: this.status,
       detail: this.message,
+      ...(this.hint && { hint: this.hint }),
       ...(challengeId && { challengeId }),
     }
   }
@@ -33,6 +47,8 @@ export declare namespace PaymentError {
     status: number
     /** Human-readable explanation. */
     detail: string
+    /** Actionable hint for resolving the error (RFC 9457 extension member). */
+    hint?: string
     /** Associated challenge ID, if applicable. */
     challengeId?: string
   }
@@ -46,6 +62,7 @@ export class MalformedCredentialError extends PaymentError {
   readonly title = 'Malformed Credential'
   override readonly status = 402
   readonly type = 'https://paymentauth.org/problems/malformed-credential'
+  override readonly hint = Hints.malformedCredential
 
   constructor(options: MalformedCredentialError.Options = {}) {
     const { reason } = options
@@ -156,6 +173,7 @@ export class PaymentRequiredError extends PaymentError {
   override readonly name = 'PaymentRequiredError'
   readonly title = 'Payment Required'
   readonly type = 'https://paymentauth.org/problems/payment-required'
+  override readonly hint = Hints.paymentRequired
 
   constructor(options: PaymentRequiredError.Options = {}) {
     const { description } = options
@@ -244,6 +262,7 @@ export class PaymentMethodUnsupportedError extends PaymentError {
   readonly title = 'Method Unsupported'
   override readonly status = 400
   readonly type = 'https://paymentauth.org/problems/method-unsupported'
+  override readonly hint = Hints.methodUnsupported
 
   constructor(options: PaymentMethodUnsupportedError.Options = {}) {
     const { method } = options
