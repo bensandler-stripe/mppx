@@ -40,6 +40,7 @@ import {
   resolveFundingNetwork,
   resolveRpcUrl,
 } from './utils.js'
+import validate from './validate/index.js'
 
 const packageJson = createRequire(import.meta.url)('../../package.json') as {
   name: string
@@ -1575,5 +1576,6 @@ cli.command(discover)
 cli.command(init)
 cli.command(services)
 cli.command(sign)
+cli.command(validate)
 
 export default cli
