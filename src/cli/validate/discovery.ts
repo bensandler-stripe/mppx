@@ -34,7 +34,11 @@ export function extractEndpointsFromDiscovery(doc: Record<string, unknown>): End
       const op = operation as Record<string, unknown>
       if (op['x-payment-info']) {
         const payInfo = op['x-payment-info'] as Record<string, unknown>
-        withPaymentInfo.push({ method: method.toUpperCase(), path: pathKey, amount: payInfo.amount as string | undefined })
+        withPaymentInfo.push({
+          method: method.toUpperCase(),
+          path: pathKey,
+          amount: payInfo.amount as string | undefined,
+        })
       } else {
         const responses = op.responses as Record<string, unknown> | undefined
         if (responses && '402' in responses) {

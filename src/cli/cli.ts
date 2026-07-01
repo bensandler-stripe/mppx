@@ -8,7 +8,6 @@ import { type Address, createClient, http } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { tempo as tempoMainnet } from 'viem/tempo/chains'
 
-import validate from './validate/index.js'
 import * as Challenge from '../Challenge.js'
 import { normalizeHeaders } from '../client/internal/Fetch.js'
 import * as Mppx from '../client/Mppx.js'
@@ -37,6 +36,7 @@ import {
   resolveFundingNetwork,
   resolveRpcUrl,
 } from './utils.js'
+import validate from './validate/index.js'
 
 const packageJson = createRequire(import.meta.url)('../../package.json') as {
   name: string

@@ -69,7 +69,11 @@ export function printResults(results: CheckResult[], counts: Counts) {
   }
 }
 
-export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 15_000): Promise<Response> {
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 15_000,
+): Promise<Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -98,8 +102,16 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
 }
 
-export const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'])
-
+export const HTTP_METHODS = new Set([
+  'get',
+  'post',
+  'put',
+  'patch',
+  'delete',
+  'head',
+  'options',
+  'trace',
+])
 
 export function isValidAddress(addr: unknown): boolean {
   return typeof addr === 'string' && /^0x[0-9a-fA-F]{40}$/.test(addr)

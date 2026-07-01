@@ -2,18 +2,18 @@ import { createClient, http } from 'viem'
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts'
 import { waitForTransactionReceipt } from 'viem/actions'
 import { Actions } from 'viem/tempo'
-import { tempo as tempoMethods } from '../../tempo/client/index.js'
 import { tempoModerato, tempo as tempoMainnetChain } from 'viem/tempo/chains'
 
 import * as Challenge from '../../Challenge.js'
-import * as Constants from '../../Constants.js'
 import * as Mppx from '../../client/Mppx.js'
+import * as Constants from '../../Constants.js'
 import * as Receipt from '../../Receipt.js'
-import { loadConfig, selectChallenge } from '../internal.js'
+import { tempo as tempoMethods } from '../../tempo/client/index.js'
+import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
 import { resolveAccount, resolveAccountName } from '../account.js'
+import { loadConfig, selectChallenge } from '../internal.js'
 import { fetchTokenInfo, confirm, pc } from '../utils.js'
 import type { CheckResult, EndpointSpec } from './helpers.js'
-import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
 import { buildUrl, check, fail, fetchWithTimeout, formatBytes, skip, warn } from './helpers.js'
 
 async function provisionAndPayTestnet(
@@ -99,7 +99,8 @@ export async function validatePaymentFlow(
   // Detect network
   const request = challenge.request as Record<string, unknown>
   const methodDetails = request.methodDetails as Record<string, unknown> | undefined
-  const isTestnet = typeof methodDetails?.chainId === 'number' && methodDetails.chainId !== tempoChainIds.mainnet
+  const isTestnet =
+    typeof methodDetails?.chainId === 'number' && methodDetails.chainId !== tempoChainIds.mainnet
 
   // Testnet Tempo: always use ephemeral wallet (zero-setup, free money)
   if (isTestnet && challenge.method === Constants.Methods.tempo) {
@@ -113,13 +114,24 @@ export async function validatePaymentFlow(
         const mppx = Mppx.create({ methods: provisioned.methods, polyfill: false })
         const cred = await mppx.createCredential(fakeResp)
         results.push(check('Payment: credential created', 'ephemeral testnet wallet'))
-        return await sendAndValidateResponse(results, url, endpoint, cred, fetchHeaders, fetchBody, verbose, true)
+        return await sendAndValidateResponse(
+          results,
+          url,
+          endpoint,
+          cred,
+          fetchHeaders,
+          fetchBody,
+          verbose,
+          true,
+        )
       } catch (error) {
         results.push(fail('Payment: create credential', (error as Error).message))
         return results
       }
     } else {
-      results.push(fail('Payment: auto-provision wallet', 'Failed to create and fund testnet wallet'))
+      results.push(
+        fail('Payment: auto-provision wallet', 'Failed to create and fund testnet wallet'),
+      )
       return results
     }
   }
@@ -129,7 +141,13 @@ export async function validatePaymentFlow(
   const selected = selectChallenge([challenge], loaded?.config)
 
   if (!selected) {
-    results.push(skip('Payment: no configured method', `Need ${challenge.method}/${challenge.intent}`, 'Run "mppx account create" to create a local wallet for payment testing. The wallet is stored on your machine and only used by mppx.'))
+    results.push(
+      skip(
+        'Payment: no configured method',
+        `Need ${challenge.method}/${challenge.intent}`,
+        'Run "mppx account create" to create a local wallet for payment testing. The wallet is stored on your machine and only used by mppx.',
+      ),
+    )
     return results
   }
 
@@ -152,7 +170,11 @@ export async function validatePaymentFlow(
       walletAddress = await resolveWalletAddress()
       if (walletAddress) {
         const client = createClient({ chain: tempoMainnetChain, transport: http() })
-        const tokenInfo = await fetchTokenInfo(client, currency as `0x${string}`, walletAddress as `0x${string}`)
+        const tokenInfo = await fetchTokenInfo(
+          client,
+          currency as `0x${string}`,
+          walletAddress as `0x${string}`,
+        )
         const requiredDisplay = `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
         const balanceDisplay = `$${(Number(tokenInfo.balance) / 10 ** tokenInfo.decimals).toFixed(2)}`
 
@@ -160,7 +182,13 @@ export async function validatePaymentFlow(
           console.log(pc.dim(`    Wallet: ${walletAddress}`))
           console.log(pc.dim(`    Balance: ${balanceDisplay} ${tokenInfo.symbol}`))
           const hint = `Wallet ${walletAddress} has ${balanceDisplay} but endpoint requires ${requiredDisplay}. Fund this wallet to run payment tests, or use a testnet server.`
-          results.push(skip('Payment: insufficient balance', `Have ${balanceDisplay}, need ${requiredDisplay}`, hint))
+          results.push(
+            skip(
+              'Payment: insufficient balance',
+              `Have ${balanceDisplay}, need ${requiredDisplay}`,
+              hint,
+            ),
+          )
           return results
         }
       }
@@ -170,11 +198,15 @@ export async function validatePaymentFlow(
   }
 
   // Prompt before paying on mainnet (unless --yes or non-interactive)
-  const amountDisplay = requiredAmount ? `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}` : 'unknown amount'
+  const amountDisplay = requiredAmount
+    ? `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
+    : 'unknown amount'
   if (walletAddress) console.log(pc.dim(`    Using wallet: ${walletAddress}`))
   const isInteractive = process.stdin.isTTY ?? false
   if (!options?.yes && !isInteractive) {
-    results.push(skip('Payment: skipped', 'Non-interactive mode. Use --yes to approve mainnet payments.'))
+    results.push(
+      skip('Payment: skipped', 'Non-interactive mode. Use --yes to approve mainnet payments.'),
+    )
     return results
   }
   if (!options?.yes) {
@@ -188,7 +220,9 @@ export async function validatePaymentFlow(
       return results
     }
   } else {
-    console.log(pc.dim(`    Auto-approved: ${amountDisplay} to ${String(request.recipient).slice(0, 10)}...`))
+    console.log(
+      pc.dim(`    Auto-approved: ${amountDisplay} to ${String(request.recipient).slice(0, 10)}...`),
+    )
   }
 
   // Setup plugin or use direct method
@@ -232,16 +266,23 @@ export async function validatePaymentFlow(
     }
   } catch (error) {
     const msg = (error as Error).message
-    const isInsufficientBalance = msg.toLowerCase().includes('insufficientbalance') || msg.toLowerCase().includes('insufficient')
+    const isInsufficientBalance =
+      msg.toLowerCase().includes('insufficientbalance') ||
+      msg.toLowerCase().includes('insufficient')
     if (isInsufficientBalance) {
       const match = msg.match(/available:\s*(\d+),\s*required:\s*(\d+)/)
       const available = match ? BigInt(match[1]!) : undefined
       const required = match ? BigInt(match[2]!) : requiredAmount
       const fromMatch = msg.match(/from:\s*(0x[0-9a-fA-F]{40})/)
       const fromAddr = fromMatch?.[1]
-      const requiredDisplay = required ? `$${(Number(required) / 10 ** decimals).toFixed(2)}` : 'unknown'
-      const availableDisplay = available !== undefined ? `$${(Number(available) / 10 ** decimals).toFixed(2)}` : undefined
-      const detail = availableDisplay ? `Have ${availableDisplay}, need ${requiredDisplay}` : `Endpoint requires ${requiredDisplay}`
+      const requiredDisplay = required
+        ? `$${(Number(required) / 10 ** decimals).toFixed(2)}`
+        : 'unknown'
+      const availableDisplay =
+        available !== undefined ? `$${(Number(available) / 10 ** decimals).toFixed(2)}` : undefined
+      const detail = availableDisplay
+        ? `Have ${availableDisplay}, need ${requiredDisplay}`
+        : `Endpoint requires ${requiredDisplay}`
       const hint = fromAddr
         ? `Wallet ${fromAddr} needs at least ${requiredDisplay}. This is a local wallet created by "mppx account create". Fund it to run payment tests, or point at a testnet server for free validation.`
         : `Fund your mppx wallet with at least ${requiredDisplay} to run payment tests, or use a testnet server.`
@@ -256,7 +297,16 @@ export async function validatePaymentFlow(
 
   // Prepare and send
   plugin?.prepareCredentialRequest?.({ challenge, credential, headers: fetchHeaders })
-  return await sendAndValidateResponse(results, url, endpoint, credential, fetchHeaders, fetchBody, verbose, isTestnet)
+  return await sendAndValidateResponse(
+    results,
+    url,
+    endpoint,
+    credential,
+    fetchHeaders,
+    fetchBody,
+    verbose,
+    isTestnet,
+  )
 }
 
 async function sendAndValidateResponse(
@@ -271,11 +321,15 @@ async function sendAndValidateResponse(
 ): Promise<CheckResult[]> {
   let paymentResponse: Response
   try {
-    paymentResponse = await fetchWithTimeout(url, {
-      method: endpoint.method,
-      headers: { ...baseHeaders, [Constants.Headers.authorization]: credential },
-      body: fetchBody ?? null,
-    }, 30_000)
+    paymentResponse = await fetchWithTimeout(
+      url,
+      {
+        method: endpoint.method,
+        headers: { ...baseHeaders, [Constants.Headers.authorization]: credential },
+        body: fetchBody ?? null,
+      },
+      30_000,
+    )
   } catch (error) {
     results.push(fail('Payment: send credential', (error as Error).message))
     return results
@@ -288,14 +342,32 @@ async function sendAndValidateResponse(
       const problem = JSON.parse(body) as Record<string, unknown>
       detail = (problem.detail as string) ?? (problem.title as string) ?? detail
     } catch {}
-    results.push(fail('Payment: accepted', detail, 'The server rejected a valid credential. Check that your payment verification logic accepts the credential format and that the payment was processed on-chain.'))
+    results.push(
+      fail(
+        'Payment: accepted',
+        detail,
+        'The server rejected a valid credential. Check that your payment verification logic accepts the credential format and that the payment was processed on-chain.',
+      ),
+    )
     return results
   }
 
   if (paymentResponse.status >= 400 && paymentResponse.status < 500) {
-    results.push(warn('Payment: post-payment response', `Got ${paymentResponse.status}`, 'Payment succeeded but the endpoint returned a client error. The endpoint likely requires request body parameters. Use --body to provide them.'))
+    results.push(
+      warn(
+        'Payment: post-payment response',
+        `Got ${paymentResponse.status}`,
+        'Payment succeeded but the endpoint returned a client error. The endpoint likely requires request body parameters. Use --body to provide them.',
+      ),
+    )
   } else if (paymentResponse.status >= 500) {
-    results.push(fail('Payment: server response', `Got ${paymentResponse.status}`, 'Payment was accepted but the server errored while generating the response. Check server logs for the underlying error.'))
+    results.push(
+      fail(
+        'Payment: server response',
+        `Got ${paymentResponse.status}`,
+        'Payment was accepted but the server errored while generating the response. Check server logs for the underlying error.',
+      ),
+    )
     return results
   } else {
     results.push(check('Payment: successful', `HTTP ${paymentResponse.status}`))
@@ -304,7 +376,13 @@ async function sendAndValidateResponse(
   // Validate receipt
   const receiptHeader = paymentResponse.headers.get(Constants.Headers.paymentReceipt)
   if (!receiptHeader) {
-    results.push(fail('Payment-Receipt header present', undefined, 'After accepting payment, include a Payment-Receipt header with a base64url-encoded JSON object containing: method, reference, status ("success"), and timestamp (ISO 8601).'))
+    results.push(
+      fail(
+        'Payment-Receipt header present',
+        undefined,
+        'After accepting payment, include a Payment-Receipt header with a base64url-encoded JSON object containing: method, reference, status ("success"), and timestamp (ISO 8601).',
+      ),
+    )
   } else {
     results.push(check('Payment-Receipt header present'))
     try {
@@ -352,17 +430,35 @@ async function sendAndValidateResponse(
   const body = await paymentResponse.text().catch(() => '')
 
   if (body.length > 0) {
-    results.push(check('Response body non-empty', `${contentType.split(';')[0]}, ${formatBytes(body.length)}`))
+    results.push(
+      check('Response body non-empty', `${contentType.split(';')[0]}, ${formatBytes(body.length)}`),
+    )
   } else {
     const suspiciousHeaders = [...paymentResponse.headers.entries()].filter(
       ([key]) =>
         !key.startsWith('x-') &&
-        !['content-type', 'content-length', 'date', 'server', 'connection', 'keep-alive',
-          'cache-control', 'vary', 'access-control-allow-origin', 'payment-receipt',
-          'payment-session', 'payment-session-snapshot'].includes(key.toLowerCase()),
+        ![
+          'content-type',
+          'content-length',
+          'date',
+          'server',
+          'connection',
+          'keep-alive',
+          'cache-control',
+          'vary',
+          'access-control-allow-origin',
+          'payment-receipt',
+          'payment-session',
+          'payment-session-snapshot',
+        ].includes(key.toLowerCase()),
     )
     if (suspiciousHeaders.length > 0) {
-      results.push(warn('Response body empty -- data may be in headers only', suspiciousHeaders.map(([k]) => k).join(', ')))
+      results.push(
+        warn(
+          'Response body empty -- data may be in headers only',
+          suspiciousHeaders.map(([k]) => k).join(', '),
+        ),
+      )
     } else {
       results.push(warn('Response body empty'))
     }

@@ -1,10 +1,19 @@
 import * as Challenge from '../../Challenge.js'
 import * as Constants from '../../Constants.js'
+import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
 import { pc } from '../utils.js'
 import { extractRequestBodyFromDiscovery } from './discovery.js'
 import type { CheckResult, EndpointSpec } from './helpers.js'
-import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
-import { buildUrl, check, fail, fetchWithTimeout, isValidAddress, isValidIntegerAmount, skip, warn } from './helpers.js'
+import {
+  buildUrl,
+  check,
+  fail,
+  fetchWithTimeout,
+  isValidAddress,
+  isValidIntegerAmount,
+  skip,
+  warn,
+} from './helpers.js'
 
 function detectTestnet(challenge: Challenge.Challenge): boolean {
   const request = challenge.request as Record<string, unknown>
@@ -19,7 +28,11 @@ export async function validateChallenge(
   baseUrl: string,
   endpoint: EndpointSpec,
   verbose: boolean,
-  options?: { body?: string | undefined; query?: string[] | undefined; discoveryDoc?: Record<string, unknown> | undefined },
+  options?: {
+    body?: string | undefined
+    query?: string[] | undefined
+    discoveryDoc?: Record<string, unknown> | undefined
+  },
 ): Promise<{ results: CheckResult[]; resolvedBody?: string | undefined }> {
   const results: CheckResult[] = []
   const url = buildUrl(baseUrl, endpoint, options?.query)
@@ -37,13 +50,21 @@ export async function validateChallenge(
 
   // If we got 400, retry with body (explicit --body or auto-generated from schema)
   if (response.status === 400) {
-    const bodyToTry = options?.body ?? (options?.discoveryDoc ? extractRequestBodyFromDiscovery(options.discoveryDoc, endpoint) : undefined)
+    const bodyToTry =
+      options?.body ??
+      (options?.discoveryDoc
+        ? extractRequestBodyFromDiscovery(options.discoveryDoc, endpoint)
+        : undefined)
     if (bodyToTry) {
       if (verbose) console.log(pc.dim(`  Retrying with body: ${bodyToTry}`))
       fetchBody = bodyToTry
       fetchHeaders['content-type'] = 'application/json'
       try {
-        response = await fetchWithTimeout(url, { method: endpoint.method, headers: fetchHeaders, body: fetchBody })
+        response = await fetchWithTimeout(url, {
+          method: endpoint.method,
+          headers: fetchHeaders,
+          body: fetchBody,
+        })
       } catch (error) {
         results.push(fail('Request failed', (error as Error).message))
         return { results }
@@ -54,9 +75,19 @@ export async function validateChallenge(
   // Check 402
   if (response.status !== 402) {
     if (response.status === 200) {
-      results.push(skip('Returns 402 without credentials', 'Got 200 (endpoint may not require payment in all cases)'))
+      results.push(
+        skip(
+          'Returns 402 without credentials',
+          'Got 200 (endpoint may not require payment in all cases)',
+        ),
+      )
     } else if (response.status === 401 || response.status === 403) {
-      results.push(skip('Returns 402 without credentials', `Got ${response.status} (endpoint requires auth before payment gate)`))
+      results.push(
+        skip(
+          'Returns 402 without credentials',
+          `Got ${response.status} (endpoint requires auth before payment gate)`,
+        ),
+      )
     } else {
       results.push(
         fail(
@@ -75,7 +106,9 @@ export async function validateChallenge(
   // Check WWW-Authenticate header
   const wwwAuth = response.headers.get(Constants.Headers.wwwAuthenticate)
   if (!wwwAuth) {
-    results.push(skip('Not an MPP endpoint', 'No WWW-Authenticate header (may be x402 or other protocol)'))
+    results.push(
+      skip('Not an MPP endpoint', 'No WWW-Authenticate header (may be x402 or other protocol)'),
+    )
     return { results }
   }
   if (!wwwAuth.startsWith(`${Constants.Schemes.payment} `)) {
@@ -95,28 +128,68 @@ export async function validateChallenge(
   results.push(check('Challenge parseable', `${challenge.method}/${challenge.intent}`))
 
   // Validate required fields
-  if (!challenge.id) results.push(fail('Challenge has id', undefined, 'Every challenge must include a unique id field. Generate a random string or hash per challenge.'))
+  if (!challenge.id)
+    results.push(
+      fail(
+        'Challenge has id',
+        undefined,
+        'Every challenge must include a unique id field. Generate a random string or hash per challenge.',
+      ),
+    )
   else results.push(check('Challenge has id'))
 
-  if (!challenge.realm) results.push(fail('Challenge has realm', undefined, 'Set realm to your server\'s hostname. It tells clients who they are paying.'))
+  if (!challenge.realm)
+    results.push(
+      fail(
+        'Challenge has realm',
+        undefined,
+        "Set realm to your server's hostname. It tells clients who they are paying.",
+      ),
+    )
   else results.push(check('Challenge has realm'))
 
-  if (!challenge.method) results.push(fail('Challenge has method', undefined, 'Set method to the payment method (e.g. "tempo", "stripe").'))
-  if (!challenge.intent) results.push(fail('Challenge has intent', undefined, 'Set intent to the payment type (e.g. "charge", "session").'))
+  if (!challenge.method)
+    results.push(
+      fail(
+        'Challenge has method',
+        undefined,
+        'Set method to the payment method (e.g. "tempo", "stripe").',
+      ),
+    )
+  if (!challenge.intent)
+    results.push(
+      fail(
+        'Challenge has intent',
+        undefined,
+        'Set intent to the payment type (e.g. "charge", "session").',
+      ),
+    )
 
   // Semantic checks
   if (challenge.expires) {
     const expiresDate = new Date(challenge.expires)
     const now = new Date()
     if (expiresDate <= now) {
-      results.push(fail('Challenge expires in the future', `Expired at ${challenge.expires}`, 'The expires timestamp must be in the future when the challenge is issued. Use a 5-10 minute window from the current time.'))
+      results.push(
+        fail(
+          'Challenge expires in the future',
+          `Expired at ${challenge.expires}`,
+          'The expires timestamp must be in the future when the challenge is issued. Use a 5-10 minute window from the current time.',
+        ),
+      )
     } else {
       const diffMs = expiresDate.getTime() - now.getTime()
       const diffMin = Math.round(diffMs / 60000)
       results.push(check('Challenge expires in the future', `${diffMin}m from now`))
     }
   } else {
-    results.push(warn('Challenge has expiration', 'No expires field set', 'Add an expires field (ISO 8601 datetime) to prevent replay attacks. Recommended: 5 minutes from issuance.'))
+    results.push(
+      warn(
+        'Challenge has expiration',
+        'No expires field set',
+        'Add an expires field (ISO 8601 datetime) to prevent replay attacks. Recommended: 5 minutes from issuance.',
+      ),
+    )
   }
 
   // Realm check (allow subdomain matches)
@@ -143,7 +216,13 @@ export async function validateChallenge(
     if (isValidAddress(request.recipient)) {
       results.push(check('Valid recipient address'))
     } else {
-      results.push(fail('Valid recipient address', `Got: ${String(request.recipient)}`, 'Set request.recipient to a valid 0x-prefixed 40-hex-char address. This is where payment will be sent.'))
+      results.push(
+        fail(
+          'Valid recipient address',
+          `Got: ${String(request.recipient)}`,
+          'Set request.recipient to a valid 0x-prefixed 40-hex-char address. This is where payment will be sent.',
+        ),
+      )
     }
 
     if (isValidAddress(request.currency)) {
@@ -151,15 +230,33 @@ export async function validateChallenge(
       const network = isTestnet ? 'testnet' : 'mainnet'
       results.push(check('Valid currency address', `${network}`))
     } else {
-      results.push(fail('Valid currency address', `Got: ${String(request.currency)}`, 'Set request.currency to a valid token address. Common: "0x20c0000000000000000000000000000000000000" (PathUSD).'))
+      results.push(
+        fail(
+          'Valid currency address',
+          `Got: ${String(request.currency)}`,
+          'Set request.currency to a valid token address. Common: "0x20c0000000000000000000000000000000000000" (PathUSD).',
+        ),
+      )
     }
 
     if (isValidIntegerAmount(request.amount)) {
       results.push(check('Amount is valid integer string'))
     } else if (request.amount === undefined || request.amount === null) {
-      results.push(warn('Amount is valid integer string', 'No amount (dynamic pricing?)', 'Set request.amount to a string of digits in the token\'s smallest unit (e.g. "10000" = $0.01 for 6-decimal tokens).'))
+      results.push(
+        warn(
+          'Amount is valid integer string',
+          'No amount (dynamic pricing?)',
+          'Set request.amount to a string of digits in the token\'s smallest unit (e.g. "10000" = $0.01 for 6-decimal tokens).',
+        ),
+      )
     } else {
-      results.push(fail('Amount is valid integer string', `Got: ${String(request.amount)}`, 'request.amount must be a string of digits (no decimals, no prefix). Example: "10000" for $0.01 with 6-decimal tokens.'))
+      results.push(
+        fail(
+          'Amount is valid integer string',
+          `Got: ${String(request.amount)}`,
+          'request.amount must be a string of digits (no decimals, no prefix). Example: "10000" for $0.01 with 6-decimal tokens.',
+        ),
+      )
     }
   } else if (challenge.method === Constants.Methods.stripe) {
     if (request.amount !== undefined) {

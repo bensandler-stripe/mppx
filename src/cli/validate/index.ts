@@ -3,8 +3,21 @@ import { Cli, z } from 'incur'
 import { validate as validateDiscovery } from '../../discovery/Validate.js'
 import { pc } from '../utils.js'
 import { validateChallenge, validateErrorHandling } from './challenge.js'
-import { extractEndpointsFromDiscovery, extractRequestBodyFromDiscovery, fetchDiscoveryDoc } from './discovery.js'
-import { check, fail, parseEndpointArg, printCheck, printResults, printSection, resolveBodyForEndpoint, warn } from './helpers.js'
+import {
+  extractEndpointsFromDiscovery,
+  extractRequestBodyFromDiscovery,
+  fetchDiscoveryDoc,
+} from './discovery.js'
+import {
+  check,
+  fail,
+  parseEndpointArg,
+  printCheck,
+  printResults,
+  printSection,
+  resolveBodyForEndpoint,
+  warn,
+} from './helpers.js'
 import type { Counts, EndpointSpec } from './helpers.js'
 import { validatePaymentFlow } from './payment.js'
 
@@ -15,13 +28,14 @@ const validate = Cli.create('validate', {
   }),
   options: z.object({
     endpoint: z.string().optional().describe('Endpoint to test (METHOD:path). Skips discovery.'),
-    body: z.string().optional().describe('Request body. With --endpoint, used directly. In discovery mode, JSON with / keys is a per-path mapping.'),
+    body: z
+      .string()
+      .optional()
+      .describe(
+        'Request body. With --endpoint, used directly. In discovery mode, JSON with / keys is a per-path mapping.',
+      ),
     query: z.array(z.string()).optional().describe('Query parameter (key=value, repeatable)'),
-    verbose: z
-      .number()
-      .default(0)
-      .meta({ count: true })
-      .describe('Verbosity level'),
+    verbose: z.number().default(0).meta({ count: true }).describe('Verbosity level'),
     yes: z.boolean().default(false).describe('Auto-approve mainnet payments'),
   }),
   alias: {
@@ -36,7 +50,11 @@ const validate = Cli.create('validate', {
 
     console.log(`\n${pc.bold('mppx validate')} ${pc.dim(baseUrl)}\n`)
 
-    const { endpoints, discoveryDoc, shouldExit } = await discoverEndpoints(baseUrl, c.options, counts)
+    const { endpoints, discoveryDoc, shouldExit } = await discoverEndpoints(
+      baseUrl,
+      c.options,
+      counts,
+    )
     if (shouldExit) process.exit(1)
     const flags = await validateEndpoints(baseUrl, endpoints, discoveryDoc, counts, {
       verbose,
@@ -55,9 +73,19 @@ export default validate
 
 async function discoverEndpoints(
   baseUrl: string,
-  options: { endpoint?: string | undefined; body?: string | undefined; query?: string[] | undefined; verbose: number; yes: boolean },
+  options: {
+    endpoint?: string | undefined
+    body?: string | undefined
+    query?: string[] | undefined
+    verbose: number
+    yes: boolean
+  },
   counts: Counts,
-): Promise<{ endpoints: EndpointSpec[]; discoveryDoc: Record<string, unknown> | null; shouldExit?: boolean }> {
+): Promise<{
+  endpoints: EndpointSpec[]
+  discoveryDoc: Record<string, unknown> | null
+  shouldExit?: boolean
+}> {
   let endpoints: EndpointSpec[] = []
   let discoveryDoc: Record<string, unknown> | null = null
 
@@ -65,13 +93,25 @@ async function discoverEndpoints(
   const discoveryResult = await fetchDiscoveryDoc(baseUrl)
 
   if ('error' in discoveryResult) {
-    printCheck(fail('Document found', discoveryResult.error, 'MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.'))
+    printCheck(
+      fail(
+        'Document found',
+        discoveryResult.error,
+        'MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.',
+      ),
+    )
     counts.failed++
     if (!options.endpoint) {
       console.log('')
       console.log(pc.yellow('  No discovery document found.'))
-      console.log(pc.dim('  MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.'))
-      console.log(pc.dim('  To test a specific endpoint: mppx validate <url> --endpoint POST:/your/path'))
+      console.log(
+        pc.dim(
+          '  MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.',
+        ),
+      )
+      console.log(
+        pc.dim('  To test a specific endpoint: mppx validate <url> --endpoint POST:/your/path'),
+      )
       console.log('')
       return { endpoints, discoveryDoc, shouldExit: true }
     }
@@ -106,7 +146,11 @@ async function discoverEndpoints(
   if (options.endpoint) {
     const parsed = parseEndpointArg(options.endpoint)
     if (!parsed) {
-      console.log(pc.red(`Invalid endpoint format: "${options.endpoint}". Use METHOD:path (e.g. GET:/api/data)`))
+      console.log(
+        pc.red(
+          `Invalid endpoint format: "${options.endpoint}". Use METHOD:path (e.g. GET:/api/data)`,
+        ),
+      )
       return { endpoints, discoveryDoc, shouldExit: true }
     }
     endpoints.push(parsed)
@@ -146,7 +190,13 @@ async function validateEndpoints(
     query?: string[] | undefined
     yes: boolean
   },
-): Promise<{ sawMppEndpoint: boolean; sawNonMppPaymentEndpoint: boolean; sawTestnet: boolean; sawMainnet: boolean; paymentSucceeded: boolean }> {
+): Promise<{
+  sawMppEndpoint: boolean
+  sawNonMppPaymentEndpoint: boolean
+  sawTestnet: boolean
+  sawMainnet: boolean
+  paymentSucceeded: boolean
+}> {
   let sawTestnet = false
   let sawMainnet = false
   let paymentSucceeded = false
@@ -172,11 +222,16 @@ async function validateEndpoints(
 
     // Challenge
     console.log(pc.dim('  Challenge'))
-    const { results: challengeResults, resolvedBody } = await validateChallenge(baseUrl, endpoint, options.verbose, {
-      body,
-      query: options.query,
-      discoveryDoc: discoveryDoc ?? undefined,
-    })
+    const { results: challengeResults, resolvedBody } = await validateChallenge(
+      baseUrl,
+      endpoint,
+      options.verbose,
+      {
+        body,
+        query: options.query,
+        discoveryDoc: discoveryDoc ?? undefined,
+      },
+    )
     const effectiveBody = resolvedBody ?? body
     printResults(challengeResults, counts)
 
@@ -184,13 +239,15 @@ async function validateEndpoints(
       (r) => r.severity === 'pass' && r.label === 'Challenge parseable',
     )
     if (!isMppEndpoint) {
-      if (challengeResults.some((r) => r.label === 'Not an MPP endpoint')) sawNonMppPaymentEndpoint = true
+      if (challengeResults.some((r) => r.label === 'Not an MPP endpoint'))
+        sawNonMppPaymentEndpoint = true
       continue
     }
     sawMppEndpoint = true
 
     const isTestnetEndpoint = challengeResults.some(
-      (r) => r.severity === 'pass' && r.label === 'Valid currency address' && r.detail === 'testnet',
+      (r) =>
+        r.severity === 'pass' && r.label === 'Valid currency address' && r.detail === 'testnet',
     )
     if (isTestnetEndpoint) sawTestnet = true
     else sawMainnet = true
@@ -221,20 +278,40 @@ async function validateEndpoints(
 
 function printSummary(
   counts: Counts,
-  flags: { sawMppEndpoint: boolean; sawNonMppPaymentEndpoint: boolean; sawTestnet: boolean; sawMainnet: boolean; paymentSucceeded: boolean },
+  flags: {
+    sawMppEndpoint: boolean
+    sawNonMppPaymentEndpoint: boolean
+    sawTestnet: boolean
+    sawMainnet: boolean
+    paymentSucceeded: boolean
+  },
   endpointsLength: number,
 ): void {
   // No MPP endpoints found
   if (!flags.sawMppEndpoint && endpointsLength > 0) {
     console.log('')
     if (flags.sawNonMppPaymentEndpoint) {
-      console.log(pc.yellow(`  No MPP endpoints found. Tested ${endpointsLength} endpoint(s) but none use WWW-Authenticate: Payment.`))
+      console.log(
+        pc.yellow(
+          `  No MPP endpoints found. Tested ${endpointsLength} endpoint(s) but none use WWW-Authenticate: Payment.`,
+        ),
+      )
       console.log(pc.dim('  This server may use x402 or another payment protocol.'))
     } else if (counts.skipped > 0 && counts.failed === 0) {
-      console.log(pc.yellow(`  Could not reach payment gate on any endpoint (all returned 401/403/200).`))
-      console.log(pc.dim('  The server may require authentication before payment. Try providing auth or use --endpoint with a public path.'))
+      console.log(
+        pc.yellow(`  Could not reach payment gate on any endpoint (all returned 401/403/200).`),
+      )
+      console.log(
+        pc.dim(
+          '  The server may require authentication before payment. Try providing auth or use --endpoint with a public path.',
+        ),
+      )
     } else {
-      console.log(pc.yellow(`  No MPP endpoints found. Tested ${endpointsLength} endpoint(s) but none use WWW-Authenticate: Payment.`))
+      console.log(
+        pc.yellow(
+          `  No MPP endpoints found. Tested ${endpointsLength} endpoint(s) but none use WWW-Authenticate: Payment.`,
+        ),
+      )
       console.log(pc.dim('  This server may use x402 or another payment protocol.'))
     }
     console.log('')
@@ -253,10 +330,16 @@ function printSummary(
   // Cross-promotion
   if (flags.paymentSucceeded && flags.sawTestnet && !flags.sawMainnet) {
     console.log('')
-    console.log(pc.dim('  Tip: validate your mainnet server too to confirm real payments work end-to-end.'))
+    console.log(
+      pc.dim('  Tip: validate your mainnet server too to confirm real payments work end-to-end.'),
+    )
   } else if (flags.sawMainnet && !flags.sawTestnet) {
     console.log('')
-    console.log(pc.dim('  Tip: validate a testnet server too for free. This CLI automatically provisions and funds a testnet wallet for testing.'))
+    console.log(
+      pc.dim(
+        '  Tip: validate a testnet server too for free. This CLI automatically provisions and funds a testnet wallet for testing.',
+      ),
+    )
   }
 
   console.log('')
