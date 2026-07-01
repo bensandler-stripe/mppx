@@ -13,6 +13,7 @@ import {
   signTransaction,
 } from 'viem/actions'
 import { Abis, Account, Actions, Addresses, Secp256k1, Tick, Transaction } from 'viem/tempo'
+import type { token as viem_token } from 'viem/tempo/actions'
 import { beforeAll, describe, expect, test } from 'vp/test'
 import * as Http from '~test/Http.js'
 import {
@@ -44,6 +45,20 @@ function isPairAlreadyExistsError(error: unknown) {
 
 function testAccount() {
   return privateKeyToAccount(generatePrivateKey())
+}
+
+// TODO: Remove once the minimum viem version is >=2.54.0, which uses client-first Tempo call builders.
+function tokenTransferCall(parameters: viem_token.transfer.Args) {
+  const call = Actions.token.transfer.call as unknown as {
+    length: number
+    (parameters: viem_token.transfer.Args): ReturnType<typeof viem_token.transfer.call>
+    (
+      client: unknown,
+      parameters: viem_token.transfer.Args,
+    ): ReturnType<typeof viem_token.transfer.call>
+  }
+  if (call.length >= 2) return call(client, parameters)
+  return call(parameters)
 }
 
 type ProofAccessKeyContext = {
@@ -278,7 +293,7 @@ describe('tempo', () => {
       const prepared = await prepareTransactionRequest(client, {
         account: accounts[1]!,
         calls: [
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(challenge.request.amount),
             to: challenge.request.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
@@ -920,18 +935,18 @@ describe('tempo', () => {
       const prepared = await prepareTransactionRequest(client, {
         account: accounts[1]!,
         calls: [
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[1]!.amount),
             to: splits[1]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: primaryAmount,
             memo: memo as Hex.Hex,
             to: challenge.request.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[0]!.amount),
             to: splits[0]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
@@ -2299,7 +2314,7 @@ describe('tempo', () => {
       const memo = Attribution.encode({ challengeId: challenge.id, serverId: challenge.realm })
 
       // Build a transaction with the valid transfer + a rogue extra call
-      const transferCall = Actions.token.transfer.call({
+      const transferCall = tokenTransferCall({
         amount: BigInt(request.amount),
         memo,
         to: request.recipient as Hex.Hex,
@@ -2556,18 +2571,18 @@ describe('tempo', () => {
       const prepared = await prepareTransactionRequest(client, {
         account: accounts[1]!,
         calls: [
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[0]!.amount),
             to: splits[0]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: primaryAmount,
             memo: memo as Hex.Hex,
             to: challenge.request.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[1]!.amount),
             to: splits[1]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
@@ -4776,18 +4791,18 @@ describe('tempo', () => {
       const prepared = await prepareTransactionRequest(client, {
         account: accounts[1]!,
         calls: [
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[0]!.amount),
             to: splits[0]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: primaryAmount,
             memo: memo as Hex.Hex,
             to: challenge.request.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[1]!.amount),
             to: splits[1]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
@@ -4846,18 +4861,18 @@ describe('tempo', () => {
       const prepared = await prepareTransactionRequest(client, {
         account: accounts[1]!,
         calls: [
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[0]!.amount),
             to: splits[0]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: primaryAmount,
             memo: memo as Hex.Hex,
             to: challenge.request.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
           }),
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(splits[1]!.amount),
             to: splits[1]!.recipient as Hex.Hex,
             token: challenge.request.currency as Hex.Hex,
@@ -5304,14 +5319,14 @@ describe('tempo', () => {
       const prepared = await prepareTransactionRequest(client, {
         account: accounts[1]!,
         calls: [
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: BigInt(challengeA.request.amount),
             memo: memoA as Hex.Hex,
             to: challengeA.request.recipient as Hex.Hex,
             token: challengeA.request.currency as Hex.Hex,
           }),
           // Dust transfer with challengeB's nonce — the exploit vector
-          Actions.token.transfer.call({
+          tokenTransferCall({
             amount: 1n,
             memo: memoB as Hex.Hex,
             to: accounts[2].address,
