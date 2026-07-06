@@ -1,11 +1,11 @@
 import * as Challenge from '../../Challenge.js'
 import * as Constants from '../../Constants.js'
 import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
+import * as x402Header from '../../x402/Header.js'
 import { pc } from '../utils.js'
-import { extractRequestBodyFromDiscovery } from './discovery.js'
+import { buildUrl, extractRequestBodyFromDiscovery } from './discovery.js'
 import type { CheckResult, EndpointSpec } from './helpers.js'
 import {
-  buildUrl,
   check,
   fail,
   fetchWithTimeout,
@@ -106,9 +106,17 @@ export async function validateChallenge(
   // Check WWW-Authenticate header
   const wwwAuth = response.headers.get(Constants.Headers.wwwAuthenticate)
   if (!wwwAuth) {
-    results.push(
-      skip('Not an MPP endpoint', 'No WWW-Authenticate header (may be x402 or other protocol)'),
-    )
+    const x402Results = checkX402Headers(response)
+    if (x402Results.length > 0) {
+      results.push(
+        skip('Not an MPP endpoint', 'No WWW-Authenticate header — x402 protocol detected'),
+      )
+      results.push(...x402Results)
+    } else {
+      results.push(
+        skip('Not an MPP endpoint', 'No WWW-Authenticate header (may be x402 or other protocol)'),
+      )
+    }
     return { results }
   }
   if (!wwwAuth.startsWith(`${Constants.Schemes.payment} `)) {
@@ -331,5 +339,35 @@ export async function validateErrorHandling(
     results.push(fail('Error handling test', (error as Error).message))
   }
 
+  return results
+}
+
+function checkX402Headers(response: Response): CheckResult[] {
+  const results: CheckResult[] = []
+  const paymentRequiredRaw =
+    response.headers.get('payment-required') ?? response.headers.get('x-payment-required')
+  if (!paymentRequiredRaw) return results
+
+  const headerName = response.headers.get('payment-required')
+    ? 'PAYMENT-REQUIRED'
+    : 'X-Payment-Required'
+
+  try {
+    const decoded = x402Header.decodePaymentRequired(paymentRequiredRaw)
+    results.push(
+      check(
+        'x402 payment challenge',
+        `${headerName} with valid x402 v${decoded.x402Version} payload`,
+      ),
+    )
+  } catch {
+    results.push(
+      warn(
+        'x402 payment challenge',
+        `${headerName} header present but failed schema validation`,
+        'Ensure the PAYMENT-REQUIRED header contains a valid base64-encoded JSON payload matching the x402 schema.',
+      ),
+    )
+  }
   return results
 }

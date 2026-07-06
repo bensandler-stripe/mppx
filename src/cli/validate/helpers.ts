@@ -11,6 +11,21 @@ export type EndpointSpec = {
   method: string
   path: string
   amount?: string | undefined
+  parameters?: PathParameter[] | undefined
+}
+
+export type PathParameter = {
+  name: string
+  in: 'path' | 'query' | 'header' | 'cookie'
+  schema?: {
+    type?: string
+    format?: string
+    pattern?: string
+    enum?: unknown[]
+    example?: unknown
+    default?: unknown
+  }
+  example?: unknown
 }
 
 export function check(label: string, detail?: string): CheckResult {
@@ -81,19 +96,6 @@ export async function fetchWithTimeout(
   } finally {
     clearTimeout(timeout)
   }
-}
-
-export function buildUrl(baseUrl: string, endpoint: EndpointSpec, query?: string[]): string {
-  let url = new URL(endpoint.path, baseUrl).href
-  if (query) {
-    const u = new URL(url)
-    for (const q of query) {
-      const [key, ...rest] = q.split('=')
-      if (key) u.searchParams.set(key, rest.join('='))
-    }
-    url = u.href
-  }
-  return url
 }
 
 export function formatBytes(bytes: number): string {

@@ -194,6 +194,11 @@
       "src": "./src/middlewares/elysia.ts",
       "types": "./dist/middlewares/elysia.d.ts",
       "default": "./dist/middlewares/elysia.js"
+    },
+    "./validate": {
+      "src": "./src/validate/index.ts",
+      "types": "./dist/validate/index.d.ts",
+      "default": "./dist/validate/index.js"
     }
   },
   "peerDependencies": {

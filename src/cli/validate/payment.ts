@@ -13,8 +13,9 @@ import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
 import { resolveAccount, resolveAccountName } from '../account.js'
 import { loadConfig, selectChallenge } from '../internal.js'
 import { fetchTokenInfo, confirm, pc } from '../utils.js'
+import { buildUrl } from './discovery.js'
 import type { CheckResult, EndpointSpec } from './helpers.js'
-import { buildUrl, check, fail, fetchWithTimeout, formatBytes, skip, warn } from './helpers.js'
+import { check, fail, fetchWithTimeout, formatBytes, skip, warn } from './helpers.js'
 
 async function provisionAndPayTestnet(
   challenge: Challenge.Challenge,
