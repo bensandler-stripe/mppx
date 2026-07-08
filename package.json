@@ -195,10 +195,10 @@
       "types": "./dist/middlewares/elysia.d.ts",
       "default": "./dist/middlewares/elysia.js"
     },
-    "./validate": {
-      "src": "./src/validate/index.ts",
-      "types": "./dist/validate/index.d.ts",
-      "default": "./dist/validate/index.js"
+    "./validation": {
+      "src": "./src/validation/index.ts",
+      "types": "./dist/validation/index.d.ts",
+      "default": "./dist/validation/index.js"
     }
   },
   "peerDependencies": {

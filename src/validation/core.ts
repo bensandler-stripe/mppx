@@ -54,6 +54,7 @@ export type ValidateResult = {
   }
 }
 
+/** Runs the full MPP validation suite against a server: discovery, challenge parsing, error handling, and (optionally) payment flow. */
 export async function validate(options: ValidateOptions): Promise<ValidateResult> {
   const baseUrl = options.url.replace(/\/$/, '').replace(/\/openapi\.json$/i, '')
   const verbose = options.verbose ?? false

@@ -1,6 +1,6 @@
 import { Cli, z } from 'incur'
 
-import { validate as validateCore } from '../../validate/core.js'
+import { validate as validateCore } from '../../validation/core.js'
 import { pc } from '../utils.js'
 import type { Counts } from './helpers.js'
 import { printResults, printSection } from './helpers.js'
