@@ -280,9 +280,9 @@ describe('validate: challenge', () => {
       }
     })
     const { output, exitCode } = await serve(['validate', server.url])
-    expect(output).toContain(
-      'Not an MPP endpoint (No WWW-Authenticate header (may be x402 or other protocol))',
-    )
+    expect(output).toContain('Not an MPP endpoint')
+    expect(output).toContain('x402 protocol detected')
+    expect(output).toContain('x402 payment challenge')
     expect(exitCode).toBe(1)
   })
 
