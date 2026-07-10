@@ -1,4 +1,4 @@
-import { createClient, http } from 'viem'
+import { type Address, createClient, http } from 'viem'
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts'
 import { waitForTransactionReceipt } from 'viem/actions'
 import { Actions } from 'viem/tempo'
@@ -11,11 +11,19 @@ import * as Receipt from '../../Receipt.js'
 import { tempo as tempoMethods } from '../../tempo/client/index.js'
 import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
 import { resolveAccount, resolveAccountName } from '../account.js'
-import { loadConfig, selectChallenge } from '../internal.js'
+import { loadConfig, resolvePlugin } from '../internal.js'
 import { fetchTokenInfo, confirm, pc } from '../utils.js'
 import { buildUrl } from './discovery.js'
 import type { CheckResult, EndpointSpec } from './helpers.js'
-import { check, fail, fetchWithTimeout, formatBytes, skip, warn } from './helpers.js'
+import {
+  check,
+  fail,
+  fetchWithTimeout,
+  formatBytes,
+  isValidIntegerAmount,
+  skip,
+  warn,
+} from './helpers.js'
 
 async function provisionAndPayTestnet(
   challenge: Challenge.Challenge,
@@ -55,11 +63,27 @@ async function resolveWalletAddress(): Promise<string | undefined> {
   }
 }
 
+function methodSetupHint(challenge: Challenge.Challenge): string {
+  switch (challenge.method) {
+    case Constants.Methods.evm:
+      return 'no EVM payment plugin yet'
+    case 'solana':
+      return 'no Solana payment plugin yet'
+    default:
+      return `no plugin for ${challenge.method}/${challenge.intent}`
+  }
+}
+
 export async function validatePaymentFlow(
   baseUrl: string,
   endpoint: EndpointSpec,
   verbose: boolean,
-  options?: { body?: string | undefined; query?: string[] | undefined; yes?: boolean | undefined },
+  options?: {
+    body?: string | undefined
+    query?: string[] | undefined
+    yes?: boolean | undefined
+    onResults?: (results: CheckResult[]) => void
+  },
 ): Promise<CheckResult[]> {
   const results: CheckResult[] = []
   const url = buildUrl(baseUrl, endpoint, options?.query)
@@ -88,33 +112,40 @@ export async function validatePaymentFlow(
     return results
   }
 
-  // Parse challenge
-  let challenge: Challenge.Challenge
+  // Parse all challenges
+  let challenges: Challenge.Challenge[]
   try {
-    challenge = Challenge.fromResponse(challengeResponse)
+    challenges = Challenge.fromResponseList(challengeResponse)
   } catch (error) {
     results.push(fail('Payment: parse challenge', (error as Error).message))
     return results
   }
-
-  // Detect network
-  const request = challenge.request as Record<string, unknown>
-  const methodDetails = request.methodDetails as Record<string, unknown> | undefined
-  const isTestnet =
-    typeof methodDetails?.chainId === 'number' && methodDetails.chainId !== tempoChainIds.mainnet
+  if (challenges.length === 0) {
+    results.push(fail('Payment: parse challenge', 'No Payment challenges in response'))
+    return results
+  }
 
   // Testnet Tempo: always use ephemeral wallet (zero-setup, free money)
-  if (isTestnet && challenge.method === Constants.Methods.tempo) {
-    const provisioned = await provisionAndPayTestnet(challenge, verbose)
+  const tempoTestnetChallenge = challenges.find((ch) => {
+    if (ch.method !== Constants.Methods.tempo) return false
+    const req = ch.request as Record<string, unknown>
+    const md = req.methodDetails as Record<string, unknown> | undefined
+    return typeof md?.chainId === 'number' && md.chainId !== tempoChainIds.mainnet
+  })
+
+  if (tempoTestnetChallenge) {
+    const provisioned = await provisionAndPayTestnet(tempoTestnetChallenge, verbose)
     if (provisioned) {
       const fakeResp = new Response(null, {
         status: 402,
-        headers: { [Constants.Headers.wwwAuthenticate]: Challenge.serialize(challenge) },
+        headers: {
+          [Constants.Headers.wwwAuthenticate]: Challenge.serialize(tempoTestnetChallenge),
+        },
       })
       try {
         const mppx = Mppx.create({ methods: provisioned.methods, polyfill: false })
         const cred = await mppx.createCredential(fakeResp)
-        results.push(check('Payment: credential created', 'ephemeral testnet wallet'))
+        results.push(check('Payment: submitted', 'ephemeral testnet wallet'))
         return await sendAndValidateResponse(
           results,
           url,
@@ -123,7 +154,7 @@ export async function validatePaymentFlow(
           fetchHeaders,
           fetchBody,
           verbose,
-          true,
+          tempoModerato,
         )
       } catch (error) {
         results.push(fail('Payment: create credential', (error as Error).message))
@@ -137,177 +168,172 @@ export async function validatePaymentFlow(
     }
   }
 
-  // Mainnet: use configured wallet
+  // Try each challenge method (skip testnet challenge already handled above)
   const loaded = await loadConfig().catch(() => undefined)
-  const selected = selectChallenge([challenge], loaded?.config)
+  const isInteractive = process.stdin.isTTY ?? false
+  const supportedPaymentMethods: Set<string> = new Set([Constants.Methods.tempo])
 
-  if (!selected) {
-    results.push(
-      skip(
-        'Payment: no configured method',
-        `Need ${challenge.method}/${challenge.intent}`,
-        'Run "mppx account create" to create a local wallet for payment testing. The wallet is stored on your machine and only used by mppx.',
-      ),
-    )
-    return results
-  }
+  for (const challenge of challenges) {
+    if (challenge === tempoTestnetChallenge) continue
+    if (!supportedPaymentMethods.has(challenge.method)) continue
 
-  const { plugin, method: directMethod } = selected
+    const flushStart = results.length
+    const flush = () => {
+      if (options?.onResults && results.length > flushStart)
+        options.onResults(results.slice(flushStart))
+    }
+    const tag = `Payment [${challenge.method}]`
 
-  if (!plugin && !directMethod) {
-    results.push(skip('Payment: no plugin available', `${challenge.method}/${challenge.intent}`))
-    return results
-  }
-
-  const requiredAmount = request.amount ? BigInt(request.amount as string) : undefined
-  // Display only -- defaults to 6 (standard for USDC/PathUSD tokens)
-  const decimals = (request.decimals as number | undefined) ?? 6
-  const currency = request.currency as string | undefined
-
-  // Pre-flight balance check
-  let walletAddress: string | undefined
-  if (challenge.method === Constants.Methods.tempo && requiredAmount && currency) {
     try {
-      walletAddress = await resolveWalletAddress()
-      if (walletAddress) {
-        const client = createClient({ chain: tempoMainnetChain, transport: http() })
-        const tokenInfo = await fetchTokenInfo(
-          client,
-          currency as `0x${string}`,
-          walletAddress as `0x${string}`,
-        )
-        const requiredDisplay = `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
-        const balanceDisplay = `$${(Number(tokenInfo.balance) / 10 ** tokenInfo.decimals).toFixed(2)}`
+      const request = challenge.request as Record<string, unknown>
+      const requiredAmount = isValidIntegerAmount(request.amount)
+        ? BigInt(request.amount as string)
+        : undefined
+      const methodDetails = request.methodDetails as Record<string, unknown> | undefined
+      const decimals =
+        (methodDetails?.decimals as number | undefined) ??
+        (request.decimals as number | undefined) ??
+        6
+      const currency = request.currency as string | undefined
 
-        if (tokenInfo.balance < requiredAmount) {
-          console.log(pc.dim(`    Wallet: ${walletAddress}`))
-          console.log(pc.dim(`    Balance: ${balanceDisplay} ${tokenInfo.symbol}`))
-          const hint = `Wallet ${walletAddress} has ${balanceDisplay} but endpoint requires ${requiredDisplay}. Fund this wallet to run payment tests, or use a testnet server.`
-          results.push(
-            skip(
-              'Payment: insufficient balance',
-              `Have ${balanceDisplay}, need ${requiredDisplay}`,
-              hint,
-            ),
-          )
-          return results
+      // Resolve wallet
+      let walletAddress: string | undefined
+      try {
+        walletAddress = await resolveWalletAddress()
+      } catch {}
+
+      if (!walletAddress) {
+        results.push(skip(tag, 'no wallet configured. Run "mppx account create" to create one.'))
+        continue
+      }
+
+      // Pre-flight balance check
+      let insufficientBalance = false
+      let tokenSymbol: string | undefined
+      if (requiredAmount && currency) {
+        try {
+          const client = createClient({ chain: tempoMainnetChain, transport: http() })
+          const info = await fetchTokenInfo(client, currency as Address, walletAddress as Address)
+          tokenSymbol = info.symbol
+          if (info.balance < requiredAmount) {
+            const requiredDisplay = `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
+            const balanceDisplay = `$${(Number(info.balance) / 10 ** info.decimals).toFixed(2)}`
+            results.push(
+              skip(
+                tag,
+                `insufficient balance (have ${balanceDisplay}, need ${requiredDisplay} ${info.symbol})`,
+              ),
+            )
+            insufficientBalance = true
+          }
+        } catch (e) {
+          if (verbose) console.log(pc.dim(`    Balance check skipped: ${(e as Error).message}`))
         }
       }
-    } catch (e) {
-      if (verbose) console.log(pc.dim(`    Balance check skipped: ${(e as Error).message}`))
-    }
-  }
+      if (insufficientBalance) continue
 
-  // Prompt before paying on mainnet (unless --yes or non-interactive)
-  const amountDisplay = requiredAmount
-    ? `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
-    : 'unknown amount'
-  if (walletAddress) console.log(pc.dim(`    Using wallet: ${walletAddress}`))
-  const isInteractive = process.stdin.isTTY ?? false
-  if (!options?.yes && !isInteractive) {
-    results.push(
-      skip('Payment: skipped', 'Non-interactive mode. Use --yes to approve mainnet payments.'),
-    )
-    return results
-  }
-  if (!options?.yes) {
-    console.log('')
-    const ok = await confirm(
-      `  ${pc.yellow('Mainnet payment:')} Will transfer ${amountDisplay} to ${String(request.recipient).slice(0, 10)}... Continue?`,
-      false,
-    )
-    if (!ok) {
-      results.push(skip('Payment: skipped by user', 'mainnet payment declined'))
-      return results
-    }
-  } else {
-    console.log(
-      pc.dim(`    Auto-approved: ${amountDisplay} to ${String(request.recipient).slice(0, 10)}...`),
-    )
-  }
+      // Prompt
+      const amountDisplay = requiredAmount
+        ? `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
+        : 'unknown amount'
+      const tokenDisplay = tokenSymbol ?? (currency?.length === 3 ? currency.toUpperCase() : '')
+      const chainName = tempoMainnetChain.name
 
-  // Setup plugin or use direct method
-  let methods: import('../../Method.js').AnyClient[]
-  let createCredentialFn: ((response: Response) => Promise<string>) | undefined
+      if (walletAddress && verbose) console.log(pc.dim(`    Using wallet: ${walletAddress}`))
 
-  if (plugin) {
-    try {
-      const pluginResult = await plugin.setup({
-        challenge,
-        options: { network: 'mainnet' },
-        methodOpts: {},
-      })
-      methods = pluginResult.methods
-      createCredentialFn = pluginResult.createCredential
-    } catch (error) {
-      const msg = (error as Error).message
-      if (msg.includes('No account found') || msg.includes('not found')) {
-        results.push(skip('Payment: no wallet configured', msg))
-      } else {
-        results.push(fail('Payment: wallet setup', msg))
+      if (!options?.yes && !isInteractive) {
+        results.push(skip(tag, 'non-interactive mode, use --yes to approve'))
+        continue
       }
-      return results
+      if (!options?.yes) {
+        console.log('')
+        const ok = await confirm(
+          `  ${pc.yellow('Pay')} ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''} on ${chainName}. Continue?`,
+          false,
+        )
+        if (!ok) {
+          results.push(skip(tag, 'declined'))
+          continue
+        }
+      } else {
+        console.log(
+          pc.dim(
+            `    Auto-approved: ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''} on ${chainName}`,
+          ),
+        )
+      }
+
+      // Resolve payment methods
+      let methods: import('../../Method.js').AnyClient[]
+      let createCredentialFn: ((response: Response) => Promise<string>) | undefined
+      let plugin: import('../plugins/plugin.js').Plugin | undefined
+
+      const resolved = resolvePlugin(challenge, loaded?.config)
+      plugin = resolved.plugin
+      const directMethod = resolved.method
+      if (!plugin && !directMethod) {
+        results.push(skip(tag, methodSetupHint(challenge)))
+        continue
+      }
+      if (plugin) {
+        try {
+          const pluginResult = await plugin.setup({
+            challenge,
+            options: { network: 'mainnet' },
+            methodOpts: {},
+          })
+          methods = pluginResult.methods
+          createCredentialFn = pluginResult.createCredential
+        } catch (error) {
+          results.push(skip(tag, (error as Error).message))
+          continue
+        }
+      } else {
+        methods = [directMethod!]
+      }
+
+      // Create credential and send
+      let credential: string
+      const fakeResponse = new Response(null, {
+        status: 402,
+        headers: { [Constants.Headers.wwwAuthenticate]: Challenge.serialize(challenge) },
+      })
+      try {
+        if (createCredentialFn) {
+          credential = await createCredentialFn(fakeResponse)
+        } else {
+          const mppx = Mppx.create({ methods, polyfill: false })
+          credential = await mppx.createCredential(fakeResponse)
+        }
+      } catch (error) {
+        const msg = (error as Error).message
+        if (msg.toLowerCase().includes('insufficient')) {
+          results.push(skip(tag, `insufficient balance: ${msg}`))
+          continue
+        }
+        results.push(fail(tag, msg))
+        continue
+      }
+
+      results.push(check(`${tag}: submitted`))
+
+      plugin?.prepareCredentialRequest?.({ challenge, credential, headers: fetchHeaders })
+      await sendAndValidateResponse(
+        results,
+        url,
+        endpoint,
+        credential,
+        fetchHeaders,
+        fetchBody,
+        verbose,
+        tempoMainnetChain,
+      )
+    } finally {
+      flush()
     }
-  } else {
-    methods = [directMethod!]
   }
 
-  // Create credential
-  let credential: string
-  const fakeResponse = new Response(null, {
-    status: 402,
-    headers: { [Constants.Headers.wwwAuthenticate]: Challenge.serialize(challenge) },
-  })
-  try {
-    if (createCredentialFn) {
-      credential = await createCredentialFn(fakeResponse)
-    } else {
-      const mppx = Mppx.create({ methods, polyfill: false })
-      credential = await mppx.createCredential(fakeResponse)
-    }
-  } catch (error) {
-    const msg = (error as Error).message
-    const isInsufficientBalance =
-      msg.toLowerCase().includes('insufficientbalance') ||
-      msg.toLowerCase().includes('insufficient')
-    if (isInsufficientBalance) {
-      const match = msg.match(/available:\s*(\d+),\s*required:\s*(\d+)/)
-      const available = match ? BigInt(match[1]!) : undefined
-      const required = match ? BigInt(match[2]!) : requiredAmount
-      const fromMatch = msg.match(/from:\s*(0x[0-9a-fA-F]{40})/)
-      const fromAddr = fromMatch?.[1]
-      const requiredDisplay = required
-        ? `$${(Number(required) / 10 ** decimals).toFixed(2)}`
-        : 'unknown'
-      const availableDisplay =
-        available !== undefined ? `$${(Number(available) / 10 ** decimals).toFixed(2)}` : undefined
-      const detail = availableDisplay
-        ? `Have ${availableDisplay}, need ${requiredDisplay}`
-        : `Endpoint requires ${requiredDisplay}`
-      const hint = fromAddr
-        ? `Wallet ${fromAddr} needs at least ${requiredDisplay}. This is a local wallet created by "mppx account create". Fund it to run payment tests, or point at a testnet server for free validation.`
-        : `Fund your mppx wallet with at least ${requiredDisplay} to run payment tests, or use a testnet server.`
-      results.push(skip('Payment: insufficient balance', detail, hint))
-      return results
-    }
-    results.push(fail('Payment: create credential', msg))
-    return results
-  }
-
-  results.push(check('Payment: credential created'))
-
-  // Prepare and send
-  plugin?.prepareCredentialRequest?.({ challenge, credential, headers: fetchHeaders })
-  return await sendAndValidateResponse(
-    results,
-    url,
-    endpoint,
-    credential,
-    fetchHeaders,
-    fetchBody,
-    verbose,
-    isTestnet,
-  )
+  return results
 }
 
 async function sendAndValidateResponse(
@@ -318,7 +344,7 @@ async function sendAndValidateResponse(
   baseHeaders: Record<string, string>,
   fetchBody: string | undefined,
   verbose: boolean,
-  isTestnet?: boolean,
+  explorerChain?: import('viem').Chain | undefined,
 ): Promise<CheckResult[]> {
   let paymentResponse: Response
   try {
@@ -476,10 +502,10 @@ async function sendAndValidateResponse(
     try {
       const receipt = Receipt.deserialize(receiptHeader)
       if (receipt.reference && /^0x[0-9a-fA-F]{64}$/.test(receipt.reference)) {
-        const chain = isTestnet ? tempoModerato : tempoMainnetChain
-        const explorerUrl = chain.blockExplorers?.default?.url
+        const explorerUrl = explorerChain?.blockExplorers?.default?.url
         if (explorerUrl) {
-          results.push(check('On-chain transaction', `${explorerUrl}/receipt/${receipt.reference}`))
+          const path = explorerUrl.includes('tempo') ? 'receipt' : 'tx'
+          results.push(check('On-chain transaction', `${explorerUrl}/${path}/${receipt.reference}`))
         }
       }
     } catch {}

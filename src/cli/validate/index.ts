@@ -53,6 +53,7 @@ const validate = Cli.create('validate', {
     const counts: Counts = { passed: 0, failed: 0, warnings: 0, skipped: 0 }
     let sawMppEndpoint = false
     let sawNonMppPaymentEndpoint = false
+    let sawMalformedChallenge = false
     let sawTestnet = false
     let sawMainnet = false
     let paymentSucceeded = false
@@ -107,6 +108,7 @@ const validate = Cli.create('validate', {
             else sawMainnet = true
           }
           if (event.isNonMppPayment) sawNonMppPaymentEndpoint = true
+          if (event.isMalformedChallenge) sawMalformedChallenge = true
           break
         case 'errorHandling':
           console.log(pc.dim('  Error Handling'))
@@ -126,6 +128,7 @@ const validate = Cli.create('validate', {
       {
         sawMppEndpoint,
         sawNonMppPaymentEndpoint,
+        sawMalformedChallenge,
         sawTestnet,
         sawMainnet,
         paymentSucceeded,
@@ -142,6 +145,7 @@ function printSummary(
   flags: {
     sawMppEndpoint: boolean
     sawNonMppPaymentEndpoint: boolean
+    sawMalformedChallenge: boolean
     sawTestnet: boolean
     sawMainnet: boolean
     paymentSucceeded: boolean
@@ -150,7 +154,23 @@ function printSummary(
 ): void {
   if (!flags.sawMppEndpoint && endpointsLength > 0) {
     console.log('')
-    if (flags.sawNonMppPaymentEndpoint) {
+    if (flags.sawMalformedChallenge) {
+      console.log(
+        pc.yellow(
+          `  Payment scheme detected but challenge format is invalid on ${endpointsLength} endpoint(s).`,
+        ),
+      )
+      console.log(
+        pc.dim(
+          '  The server uses WWW-Authenticate: Payment but the challenge parameters do not conform to MPP.',
+        ),
+      )
+      console.log(
+        pc.dim(
+          '  Fix: encode payment details as base64url JSON in a request="..." parameter. See errors above.',
+        ),
+      )
+    } else if (flags.sawNonMppPaymentEndpoint) {
       console.log(
         pc.yellow(
           `  No MPP endpoints found. Tested ${endpointsLength} endpoint(s) but none use WWW-Authenticate: Payment.`,

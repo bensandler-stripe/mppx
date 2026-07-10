@@ -33,7 +33,11 @@ export async function validateChallenge(
     query?: string[] | undefined
     discoveryDoc?: Record<string, unknown> | undefined
   },
-): Promise<{ results: CheckResult[]; resolvedBody?: string | undefined }> {
+): Promise<{
+  results: CheckResult[]
+  resolvedBody?: string | undefined
+  challenges?: Challenge.Challenge[] | undefined
+}> {
   const results: CheckResult[] = []
   const url = buildUrl(baseUrl, endpoint, options?.query)
   const fetchHeaders: Record<string, string> = {}
@@ -125,160 +129,331 @@ export async function validateChallenge(
   }
   results.push(check('WWW-Authenticate header present', 'Payment scheme'))
 
-  // Parse challenge
-  let challenge: Challenge.Challenge
+  // Parse all challenges
+  let challenges: Challenge.Challenge[]
   try {
-    challenge = Challenge.fromResponse(response)
+    challenges = Challenge.fromResponseList(response)
   } catch (error) {
-    results.push(fail('Challenge parseable', (error as Error).message))
+    const msg = (error as Error).message
+    results.push(
+      fail(
+        'Challenge parseable',
+        msg,
+        'The Payment challenge must include a request="<base64url>" parameter containing JSON-encoded payment details.',
+      ),
+    )
+    const rawParams = wwwAuth.slice(wwwAuth.indexOf(' ') + 1)
+    results.push(
+      warn('Received', rawParams.length > 200 ? rawParams.slice(0, 200) + '...' : rawParams),
+    )
     return { results }
   }
-  results.push(check('Challenge parseable', `${challenge.method}/${challenge.intent}`))
 
-  // Validate required fields
-  if (!challenge.id)
-    results.push(
-      fail(
-        'Challenge has id',
-        undefined,
-        'Every challenge must include a unique id field. Generate a random string or hash per challenge.',
-      ),
-    )
-  else results.push(check('Challenge has id'))
-
-  if (!challenge.realm)
-    results.push(
-      fail(
-        'Challenge has realm',
-        undefined,
-        "Set realm to your server's hostname. It tells clients who they are paying.",
-      ),
-    )
-  else results.push(check('Challenge has realm'))
-
-  if (!challenge.method)
-    results.push(
-      fail(
-        'Challenge has method',
-        undefined,
-        'Set method to the payment method (e.g. "tempo", "stripe").',
-      ),
-    )
-  if (!challenge.intent)
-    results.push(
-      fail(
-        'Challenge has intent',
-        undefined,
-        'Set intent to the payment type (e.g. "charge", "session").',
-      ),
-    )
-
-  // Semantic checks
-  if (challenge.expires) {
-    const expiresDate = new Date(challenge.expires)
-    const now = new Date()
-    if (expiresDate <= now) {
-      results.push(
-        fail(
-          'Challenge expires in the future',
-          `Expired at ${challenge.expires}`,
-          'The expires timestamp must be in the future when the challenge is issued. Use a 5-10 minute window from the current time.',
-        ),
-      )
-    } else {
-      const diffMs = expiresDate.getTime() - now.getTime()
-      const diffMin = Math.round(diffMs / 60000)
-      results.push(check('Challenge expires in the future', `${diffMin}m from now`))
-    }
-  } else {
-    results.push(
-      warn(
-        'Challenge has expiration',
-        'No expires field set',
-        'Add an expires field (ISO 8601 datetime) to prevent replay attacks. Recommended: 5 minutes from issuance.',
-      ),
-    )
+  if (challenges.length === 0) {
+    results.push(fail('Challenge parseable', 'No Payment challenges found in header'))
+    return { results }
   }
 
-  // Realm check (allow subdomain matches)
-  try {
-    const serverHost = new URL(baseUrl).hostname
-    const realm = challenge.realm ?? ''
-    const matches = serverHost === realm || serverHost.endsWith(`.${realm}`)
-    if (matches) {
-      results.push(check('Realm matches server hostname'))
-    } else {
-      results.push(
-        warn(
-          'Realm matches server hostname',
-          `realm="${realm}" vs host="${serverHost}"`,
-          'Set the realm to your production hostname (or base domain) in the challenge. Clients use realm to verify they are paying the right server.',
-        ),
-      )
-    }
-  } catch {}
+  const methodList = challenges.map((c) => `${c.method}/${c.intent}`).join(', ')
+  results.push(
+    check(
+      'Challenge parseable',
+      challenges.length === 1 ? methodList : `${challenges.length} methods: ${methodList}`,
+    ),
+  )
+
+  // Validate common fields across all challenges
+  const serverHost = new URL(baseUrl).hostname
+  validateIds(challenges, results)
+  validateRealms(challenges, results)
+  validateExpiration(challenges, results)
+  validateRealmMatchesHost(challenges, serverHost, results)
 
   // Method-specific validation
-  const request = challenge.request as Record<string, unknown>
-  if (challenge.method === Constants.Methods.tempo) {
-    if (isValidAddress(request.recipient)) {
-      results.push(check('Valid recipient address'))
-    } else {
-      results.push(
-        fail(
-          'Valid recipient address',
-          `Got: ${String(request.recipient)}`,
-          'Set request.recipient to a valid 0x-prefixed 40-hex-char address. This is where payment will be sent.',
-        ),
-      )
-    }
-
-    if (isValidAddress(request.currency)) {
-      const isTestnet = detectTestnet(challenge)
-      const network = isTestnet ? 'testnet' : 'mainnet'
-      results.push(check('Valid currency address', `${network}`))
-    } else {
-      results.push(
-        fail(
-          'Valid currency address',
-          `Got: ${String(request.currency)}`,
-          'Set request.currency to a valid token address. Common: "0x20c0000000000000000000000000000000000000" (PathUSD).',
-        ),
-      )
-    }
-
-    if (isValidIntegerAmount(request.amount)) {
-      results.push(check('Amount is valid integer string'))
-    } else if (request.amount === undefined || request.amount === null) {
-      results.push(
-        warn(
-          'Amount is valid integer string',
-          'No amount (dynamic pricing?)',
-          'Set request.amount to a string of digits in the token\'s smallest unit (e.g. "10000" = $0.01 for 6-decimal tokens).',
-        ),
-      )
-    } else {
-      results.push(
-        fail(
-          'Amount is valid integer string',
-          `Got: ${String(request.amount)}`,
-          'request.amount must be a string of digits (no decimals, no prefix). Example: "10000" for $0.01 with 6-decimal tokens.',
-        ),
-      )
-    }
-  } else if (challenge.method === Constants.Methods.stripe) {
-    if (request.amount !== undefined) {
-      results.push(check('Stripe challenge has amount'))
-    } else {
-      results.push(warn('Stripe challenge has amount', 'No amount field'))
-    }
+  const hasMultipleMethods = challenges.length > 1
+  for (const ch of challenges) {
+    const request = ch.request as Record<string, unknown>
+    validateMethodFields(ch, request, results, hasMultipleMethods)
   }
 
   if (verbose) {
-    console.log(pc.dim(`    Challenge: ${JSON.stringify(challenge, null, 2)}`))
+    for (const ch of challenges) {
+      console.log(
+        pc.dim(`    Challenge (${ch.method}/${ch.intent}): ${JSON.stringify(ch, null, 2)}`),
+      )
+    }
   }
 
-  return { results, resolvedBody: fetchBody }
+  return { results, resolvedBody: fetchBody, challenges }
+}
+
+function validateIds(challenges: Challenge.Challenge[], results: CheckResult[]): void {
+  const missing = challenges.filter((ch) => !ch.id)
+  if (missing.length === 0) {
+    results.push(check('Challenge has id'))
+  } else {
+    results.push(
+      fail(
+        'Challenge has id',
+        `${missing.length} missing`,
+        'Every challenge must include a unique id field.',
+      ),
+    )
+  }
+}
+
+function validateRealms(challenges: Challenge.Challenge[], results: CheckResult[]): void {
+  const missing = challenges.filter((ch) => !ch.realm)
+  if (missing.length === 0) {
+    results.push(check('Challenge has realm'))
+  } else {
+    results.push(
+      fail(
+        'Challenge has realm',
+        `${missing.length} missing`,
+        "Set realm to your server's hostname.",
+      ),
+    )
+  }
+}
+
+function validateExpiration(challenges: Challenge.Challenge[], results: CheckResult[]): void {
+  const now = new Date()
+  for (const ch of challenges) {
+    if (!ch.expires) {
+      results.push(
+        warn(
+          'Challenge has expiration',
+          'missing expires field',
+          'Add an expires field (ISO 8601) to prevent replay attacks.',
+        ),
+      )
+      return
+    }
+    if (new Date(ch.expires) <= now) {
+      results.push(
+        fail(
+          'Challenge expires in the future',
+          `Expired at ${ch.expires}`,
+          'The expires timestamp must be in the future.',
+        ),
+      )
+      return
+    }
+  }
+  const soonest = Math.min(
+    ...challenges.map((ch) => new Date(ch.expires!).getTime() - now.getTime()),
+  )
+  results.push(check('Challenge expires in the future', `${Math.round(soonest / 60000)}m from now`))
+}
+
+function validateRealmMatchesHost(
+  challenges: Challenge.Challenge[],
+  serverHost: string,
+  results: CheckResult[],
+): void {
+  const realms = [...new Set(challenges.map((ch) => ch.realm ?? ''))]
+  const badRealms = realms.filter((r) => r && r !== serverHost && !serverHost.endsWith(`.${r}`))
+  if (badRealms.length > 0) {
+    results.push(
+      warn(
+        'Realm matches server hostname',
+        `realm="${badRealms[0]}" vs host="${serverHost}"`,
+        'Set the realm to your production hostname (or base domain) in the challenge.',
+      ),
+    )
+  } else {
+    results.push(check('Realm matches server hostname'))
+  }
+}
+
+function validateMethodFields(
+  challenge: Challenge.Challenge,
+  request: Record<string, unknown>,
+  results: CheckResult[],
+  hasMultipleMethods: boolean,
+): void {
+  const tag = hasMultipleMethods ? `[${challenge.method}] ` : ''
+
+  if (challenge.method === Constants.Methods.tempo)
+    validateTempoFields(request, tag, results, challenge)
+  else if (challenge.method === Constants.Methods.stripe)
+    validateStripeFields(request, tag, results)
+  else if (challenge.method === Constants.Methods.evm) validateEvmFields(request, tag, results)
+}
+
+function validateTempoFields(
+  request: Record<string, unknown>,
+  tag: string,
+  results: CheckResult[],
+  challenge: Challenge.Challenge,
+): void {
+  const methodDetails = request.methodDetails as Record<string, unknown> | undefined
+  const hasSplits = Array.isArray(methodDetails?.splits) && methodDetails.splits.length > 0
+
+  if (isValidAddress(request.recipient)) {
+    results.push(check(`${tag}Valid recipient address`))
+  } else if (request.recipient === undefined && hasSplits) {
+    results.push(check(`${tag}Uses splits (no single recipient)`))
+  } else if (request.recipient === undefined) {
+    results.push(
+      fail(
+        `${tag}Valid recipient address`,
+        'Missing recipient (and no splits defined)',
+        'Set request.recipient to a valid 0x address, or use methodDetails.splits for multiple recipients.',
+      ),
+    )
+  } else {
+    results.push(
+      fail(
+        `${tag}Valid recipient address`,
+        `Got: ${String(request.recipient)}`,
+        'Set request.recipient to a valid 0x-prefixed 40-hex-char address.',
+      ),
+    )
+  }
+
+  if (isValidAddress(request.currency)) {
+    const network = detectTestnet(challenge) ? 'testnet' : 'mainnet'
+    results.push(check(`${tag}Valid currency address`, network))
+  } else {
+    results.push(
+      fail(
+        `${tag}Valid currency address`,
+        `Got: ${String(request.currency)}`,
+        'Set request.currency to a valid token address.',
+      ),
+    )
+  }
+
+  validateAmount(
+    request,
+    tag,
+    results,
+    'token\'s smallest unit (e.g. "10000" = $0.01 for 6-decimal tokens)',
+  )
+}
+
+function validateStripeFields(
+  request: Record<string, unknown>,
+  tag: string,
+  results: CheckResult[],
+): void {
+  validateAmount(request, tag, results, 'currency\'s smallest unit (e.g. "100" = $1.00 for USD)')
+
+  const currency = request.currency as string | undefined
+  const validCurrency = typeof currency === 'string' && /^[a-z]{3}$/i.test(currency)
+  if (validCurrency) {
+    results.push(check(`${tag}Valid currency code`, currency.toUpperCase()))
+  } else {
+    results.push(
+      fail(
+        `${tag}Valid currency code`,
+        currency ? `Got: ${currency}` : 'missing',
+        'Must be a three-letter ISO currency code (e.g. "usd").',
+      ),
+    )
+  }
+
+  const methodDetails = request.methodDetails as Record<string, unknown> | undefined
+  const networkId = methodDetails?.networkId as string | undefined
+  if (networkId) {
+    results.push(check(`${tag}Has networkId`, networkId.slice(0, 20)))
+  } else {
+    results.push(
+      fail(
+        `${tag}Has networkId`,
+        'Missing methodDetails.networkId',
+        'Set methodDetails.networkId to your Stripe Business Network profile ID.',
+      ),
+    )
+  }
+
+  const pmTypes = methodDetails?.paymentMethodTypes as string[] | undefined
+  if (Array.isArray(pmTypes) && pmTypes.length > 0) {
+    results.push(check(`${tag}Has paymentMethodTypes`, pmTypes.join(', ')))
+  } else {
+    results.push(
+      fail(
+        `${tag}Has paymentMethodTypes`,
+        'Missing or empty',
+        'Set methodDetails.paymentMethodTypes to an array (e.g. ["card"]).',
+      ),
+    )
+  }
+}
+
+function validateEvmFields(
+  request: Record<string, unknown>,
+  tag: string,
+  results: CheckResult[],
+): void {
+  if (isValidAddress(request.recipient)) {
+    results.push(check(`${tag}Valid recipient address`))
+  } else {
+    results.push(
+      fail(
+        `${tag}Valid recipient address`,
+        `Got: ${String(request.recipient)}`,
+        'Set request.recipient to a valid 0x-prefixed Ethereum address.',
+      ),
+    )
+  }
+
+  if (isValidAddress(request.currency)) {
+    results.push(check(`${tag}Valid currency address`))
+  } else {
+    results.push(
+      fail(
+        `${tag}Valid currency address`,
+        `Got: ${String(request.currency)}`,
+        'Set request.currency to a valid ERC-20 token contract address.',
+      ),
+    )
+  }
+
+  validateAmount(request, tag, results, "token's smallest unit")
+
+  const methodDetails = request.methodDetails as Record<string, unknown> | undefined
+  const chainId = methodDetails?.chainId as number | undefined
+  if (typeof chainId === 'number' && chainId > 0) {
+    results.push(check(`${tag}Has chainId`, String(chainId)))
+  } else {
+    results.push(
+      fail(
+        `${tag}Has chainId`,
+        'Missing methodDetails.chainId',
+        'Set methodDetails.chainId to the EVM chain ID.',
+      ),
+    )
+  }
+}
+
+function validateAmount(
+  request: Record<string, unknown>,
+  tag: string,
+  results: CheckResult[],
+  unitHint: string,
+): void {
+  if (isValidIntegerAmount(request.amount)) {
+    results.push(check(`${tag}Amount is valid integer string`))
+  } else if (request.amount === undefined || request.amount === null) {
+    results.push(
+      fail(
+        `${tag}Amount is valid integer string`,
+        'Missing amount',
+        `Set request.amount to a string of digits in the ${unitHint}.`,
+      ),
+    )
+  } else {
+    results.push(
+      fail(
+        `${tag}Amount is valid integer string`,
+        `Got: ${String(request.amount)}`,
+        'request.amount must be a string of digits (no decimals, no prefix).',
+      ),
+    )
+  }
 }
 
 export async function validateErrorHandling(

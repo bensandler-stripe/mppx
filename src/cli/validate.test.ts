@@ -159,6 +159,12 @@ describe('validate: discovery', () => {
     expect(output).toContain('Document found and parseable')
   })
 
+  test('discovers openapi.json at root when subpath given', { timeout: 15_000 }, async () => {
+    const server = await mppServer(makeChallenge())
+    const { output } = await serve(['validate', `${server.url}/mpp`])
+    expect(output).toContain('Document found and parseable')
+  })
+
   test('reports invalid JSON', { timeout: 15_000 }, async () => {
     const server = await testServer((req, res) => {
       if (req.url?.includes('openapi.json')) {
@@ -535,5 +541,139 @@ describe('validate: summary', () => {
     const { output, exitCode } = await serve(['validate', server.url])
     expect(exitCode).toBe(1)
     expect(output).toContain('failed')
+  })
+})
+
+describe('validate: multi-challenge', () => {
+  function makeStripeChallenge(): Challenge.Challenge {
+    return {
+      id: 'stripe-id-123',
+      realm: 'localhost',
+      method: 'stripe',
+      intent: 'charge',
+      request: {
+        amount: '100',
+        currency: 'usd',
+        methodDetails: {
+          networkId: 'profile_test123',
+          paymentMethodTypes: ['card'],
+        },
+      },
+      expires: new Date(Date.now() + 300_000).toISOString(),
+    } as Challenge.Challenge
+  }
+
+  function makeEvmChallenge(): Challenge.Challenge {
+    return {
+      id: 'evm-id-123',
+      realm: 'localhost',
+      method: 'evm',
+      intent: 'charge',
+      request: {
+        amount: '10000',
+        currency: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        recipient: '0x1234567890123456789012345678901234567890',
+        methodDetails: { chainId: 8453, credentialTypes: ['authorization'], decimals: 6 },
+      },
+      expires: new Date(Date.now() + 300_000).toISOString(),
+    } as Challenge.Challenge
+  }
+
+  function multiChallengeServer(challenges: Challenge.Challenge[]) {
+    const header = challenges.map((c) => Challenge.serialize(c)).join(', ')
+    return testServer((req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      if (url.pathname === '/openapi.json') {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(makeDiscoveryDoc({ '/api/test': {} }))
+        return
+      }
+      res.writeHead(402, { [Constants.Headers.wwwAuthenticate]: header })
+      res.end()
+    })
+  }
+
+  test('parses multiple challenges', { timeout: 15_000 }, async () => {
+    const server = await multiChallengeServer([makeChallenge(), makeStripeChallenge()])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('2 methods: tempo/charge, stripe/charge')
+  })
+
+  test('validates Stripe fields', { timeout: 15_000 }, async () => {
+    const server = await multiChallengeServer([makeStripeChallenge()])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('Amount is valid integer string')
+    expect(output).toContain('Valid currency code (USD)')
+    expect(output).toContain('Has networkId')
+    expect(output).toContain('Has paymentMethodTypes (card)')
+  })
+
+  test('validates EVM fields', { timeout: 15_000 }, async () => {
+    const server = await multiChallengeServer([makeEvmChallenge()])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('Valid recipient address')
+    expect(output).toContain('Valid currency address')
+    expect(output).toContain('Amount is valid integer string')
+    expect(output).toContain('Has chainId (8453)')
+  })
+
+  test('tags method names when multiple challenges present', { timeout: 15_000 }, async () => {
+    const server = await multiChallengeServer([
+      makeChallenge(),
+      makeStripeChallenge(),
+      makeEvmChallenge(),
+    ])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('[tempo] Valid recipient address')
+    expect(output).toContain('[stripe] Valid currency code')
+    expect(output).toContain('[evm] Has chainId')
+  })
+
+  test('no tags with single challenge', { timeout: 15_000 }, async () => {
+    const server = await multiChallengeServer([makeChallenge()])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('Valid recipient address')
+    expect(output).not.toContain('[tempo]')
+  })
+
+  test('Tempo requires recipient or splits', { timeout: 15_000 }, async () => {
+    const noRecipient = makeChallenge({
+      request: {
+        amount: '10000',
+        currency: '0x20c0000000000000000000000000000000000000',
+        methodDetails: { chainId: 42431 },
+      },
+    } as Partial<Challenge.Challenge>)
+    const server = await multiChallengeServer([noRecipient])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('Missing recipient (and no splits defined)')
+  })
+
+  test('Tempo accepts splits without recipient', { timeout: 15_000 }, async () => {
+    const withSplits = makeChallenge({
+      request: {
+        amount: '10000',
+        currency: '0x20c0000000000000000000000000000000000000',
+        methodDetails: {
+          chainId: 42431,
+          splits: [
+            { amount: '5000', recipient: '0x1234567890123456789012345678901234567890' },
+            { amount: '5000', recipient: '0x0987654321098765432109876543210987654321' },
+          ],
+        },
+      },
+    } as Partial<Challenge.Challenge>)
+    const server = await multiChallengeServer([withSplits])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('Uses splits (no single recipient)')
+    expect(output).not.toContain('Missing recipient')
+  })
+
+  test('fails on invalid Stripe amount', { timeout: 15_000 }, async () => {
+    const bad = makeStripeChallenge()
+    ;(bad.request as Record<string, unknown>).amount = '1.50'
+    const server = await multiChallengeServer([bad])
+    const { output } = await serve(['validate', server.url])
+    expect(output).toContain('Amount is valid integer string (Got: 1.50)')
   })
 })
