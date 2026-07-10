@@ -267,10 +267,160 @@ export async function validateChallenge(
       )
     }
   } else if (challenge.method === Constants.Methods.stripe) {
-    if (request.amount !== undefined) {
-      results.push(check('Stripe challenge has amount'))
+    // Amount
+    if (isValidIntegerAmount(request.amount)) {
+      results.push(check('Amount is valid integer string'))
+    } else if (request.amount === undefined || request.amount === null) {
+      results.push(
+        warn(
+          'Amount is valid integer string',
+          'No amount (dynamic pricing?)',
+          'Set request.amount to a string of digits in the currency\'s smallest unit (e.g. "100" = $1.00 for USD).',
+        ),
+      )
     } else {
-      results.push(warn('Stripe challenge has amount', 'No amount field'))
+      results.push(
+        fail(
+          'Amount is valid integer string',
+          `Got: ${String(request.amount)}`,
+          'request.amount must be a string of digits (no decimals, no prefix). Example: "100" for $1.00 in USD cents.',
+        ),
+      )
+    }
+
+    // Currency
+    const currency = request.currency as string | undefined
+    if (currency && /^[a-z]{3}$/i.test(currency)) {
+      results.push(check('Valid currency code', currency.toUpperCase()))
+    } else if (!currency) {
+      results.push(
+        fail(
+          'Valid currency code',
+          'Missing currency',
+          'Set request.currency to a three-letter ISO currency code (e.g. "usd").',
+        ),
+      )
+    } else {
+      results.push(
+        fail(
+          'Valid currency code',
+          `Got: ${currency}`,
+          'request.currency must be a three-letter ISO currency code (e.g. "usd", "eur").',
+        ),
+      )
+    }
+
+    // Decimals
+    const decimals = request.decimals as number | undefined
+    if (typeof decimals === 'number' && Number.isInteger(decimals) && decimals >= 0) {
+      results.push(check('Has decimals', String(decimals)))
+    } else if (decimals === undefined) {
+      results.push(
+        fail(
+          'Has decimals',
+          'Missing decimals field',
+          'Set request.decimals to the number of decimal places for the currency (e.g. 2 for USD).',
+        ),
+      )
+    } else {
+      results.push(
+        fail(
+          'Has decimals',
+          `Got: ${String(decimals)}`,
+          'request.decimals must be a non-negative integer.',
+        ),
+      )
+    }
+
+    // networkId
+    const methodDetails = request.methodDetails as Record<string, unknown> | undefined
+    const networkId = methodDetails?.networkId as string | undefined
+    if (networkId) {
+      results.push(check('Has networkId', networkId.slice(0, 20)))
+    } else {
+      results.push(
+        fail(
+          'Has networkId',
+          'Missing methodDetails.networkId',
+          'Set methodDetails.networkId to your Stripe Business Network profile ID.',
+        ),
+      )
+    }
+
+    // paymentMethodTypes
+    const pmTypes = methodDetails?.paymentMethodTypes as string[] | undefined
+    if (Array.isArray(pmTypes) && pmTypes.length > 0) {
+      results.push(check('Has paymentMethodTypes', pmTypes.join(', ')))
+    } else {
+      results.push(
+        fail(
+          'Has paymentMethodTypes',
+          'Missing or empty methodDetails.paymentMethodTypes',
+          'Set methodDetails.paymentMethodTypes to an array of accepted payment method types (e.g. ["card"]).',
+        ),
+      )
+    }
+  } else if (challenge.method === Constants.Methods.evm) {
+    // Recipient
+    if (isValidAddress(request.recipient)) {
+      results.push(check('Valid recipient address'))
+    } else {
+      results.push(
+        fail(
+          'Valid recipient address',
+          `Got: ${String(request.recipient)}`,
+          'Set request.recipient to a valid 0x-prefixed 40-hex-char Ethereum address.',
+        ),
+      )
+    }
+
+    // Currency (token address)
+    if (isValidAddress(request.currency)) {
+      results.push(check('Valid currency address'))
+    } else {
+      results.push(
+        fail(
+          'Valid currency address',
+          `Got: ${String(request.currency)}`,
+          'Set request.currency to a valid ERC-20 token contract address.',
+        ),
+      )
+    }
+
+    // Amount
+    if (isValidIntegerAmount(request.amount)) {
+      results.push(check('Amount is valid integer string'))
+    } else if (request.amount === undefined || request.amount === null) {
+      results.push(
+        warn(
+          'Amount is valid integer string',
+          'No amount (dynamic pricing?)',
+          "Set request.amount to a string of digits in the token's smallest unit.",
+        ),
+      )
+    } else {
+      results.push(
+        fail(
+          'Amount is valid integer string',
+          `Got: ${String(request.amount)}`,
+          'request.amount must be a string of digits (no decimals, no prefix).',
+        ),
+      )
+    }
+
+    // chainId
+    const methodDetails = request.methodDetails as Record<string, unknown> | undefined
+    const chainId = methodDetails?.chainId as number | undefined
+    if (typeof chainId === 'number' && chainId > 0) {
+      results.push(check('Has chainId', String(chainId)))
+    } else {
+      results.push(
+        fail(
+          'Has chainId',
+          'Missing methodDetails.chainId',
+          'Set methodDetails.chainId to the EVM chain ID where payment will be processed.',
+        ),
+      )
     }
   }
 
