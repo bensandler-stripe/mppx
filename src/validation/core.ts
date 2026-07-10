@@ -54,21 +54,31 @@ export type ValidateResult = {
   }
 }
 
-/** Runs the full MPP validation suite against a server: discovery, challenge parsing, error handling, and (optionally) payment flow. */
-export async function validate(options: ValidateOptions): Promise<ValidateResult> {
+export type ValidateEvent =
+  | { phase: 'discovery'; discovery: DiscoveryResult; results: CheckResult[] }
+  | { phase: 'endpoint'; endpoint: EndpointSpec }
+  | {
+      phase: 'challenge'
+      endpoint: EndpointSpec
+      results: CheckResult[]
+      isMpp: boolean
+      isTestnet: boolean
+      isNonMppPayment: boolean
+    }
+  | { phase: 'errorHandling'; endpoint: EndpointSpec; results: CheckResult[] }
+  | { phase: 'payment'; endpoint: EndpointSpec; results: CheckResult[]; succeeded: boolean }
+
+/** Streams validation results as each phase completes. */
+export async function* validateStream(options: ValidateOptions): AsyncGenerator<ValidateEvent> {
   const baseUrl = options.url.replace(/\/$/, '').replace(/\/openapi\.json$/i, '')
   const verbose = options.verbose ?? false
 
   const discovery = await runDiscovery(baseUrl, options)
-  const endpointResults: EndpointValidationResult[] = []
-
-  let sawTestnet = false
-  let sawMainnet = false
-  let paymentSucceeded = false
-  let sawMppEndpoint = false
-  let sawNonMppPaymentEndpoint = false
+  yield { phase: 'discovery', discovery, results: discovery.checks }
 
   for (const endpoint of discovery.endpoints) {
+    yield { phase: 'endpoint', endpoint }
+
     let body: string | undefined
     if (options.endpoint) {
       body = options.body
@@ -90,56 +100,103 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
       },
     )
     const effectiveBody = resolvedBody ?? body
-
-    const isMppEndpoint = challengeResults.some(
+    const isMpp = challengeResults.some(
       (r) => r.severity === 'pass' && r.label === 'Challenge parseable',
     )
+    const isTestnet = challengeResults.some(
+      (r) =>
+        r.severity === 'pass' && r.label === 'Valid currency address' && r.detail === 'testnet',
+    )
+    const isNonMppPayment =
+      !isMpp && challengeResults.some((r) => r.label === 'Not an MPP endpoint')
 
-    let errorResults: CheckResult[] = []
-    let paymentResults: CheckResult[] = []
+    yield {
+      phase: 'challenge',
+      endpoint,
+      results: challengeResults,
+      isMpp,
+      isTestnet,
+      isNonMppPayment,
+    }
 
-    if (isMppEndpoint) {
-      sawMppEndpoint = true
-
-      const isTestnetEndpoint = challengeResults.some(
-        (r) =>
-          r.severity === 'pass' && r.label === 'Valid currency address' && r.detail === 'testnet',
-      )
-      if (isTestnetEndpoint) sawTestnet = true
-      else sawMainnet = true
-
-      errorResults = await validateErrorHandling(baseUrl, endpoint, {
+    if (isMpp) {
+      const errorResults = await validateErrorHandling(baseUrl, endpoint, {
         body: effectiveBody,
         query: options.query,
       })
+      yield { phase: 'errorHandling', endpoint, results: errorResults }
 
       if (!options.skipPayment) {
-        paymentResults = await validatePaymentFlow(baseUrl, endpoint, verbose, {
+        const paymentResults = await validatePaymentFlow(baseUrl, endpoint, verbose, {
           body: effectiveBody,
           query: options.query,
           yes: options.yes,
         })
-        if (
-          paymentResults.some((r) => r.severity === 'pass' && r.label === 'Payment: successful')
-        ) {
-          paymentSucceeded = true
-        }
+        const succeeded = paymentResults.some(
+          (r) => r.severity === 'pass' && r.label === 'Payment: successful',
+        )
+        yield { phase: 'payment', endpoint, results: paymentResults, succeeded }
       }
-    } else {
-      if (challengeResults.some((r) => r.label === 'Not an MPP endpoint'))
-        sawNonMppPaymentEndpoint = true
     }
+  }
+}
 
-    endpointResults.push({
-      method: endpoint.method,
-      path: endpoint.path,
-      challenge: challengeResults,
-      errorHandling: errorResults,
-      payment: paymentResults,
-    })
+/** Runs the full validation suite and returns all results as a batch. */
+export async function validate(options: ValidateOptions): Promise<ValidateResult> {
+  const baseUrl = options.url.replace(/\/$/, '').replace(/\/openapi\.json$/i, '')
+  let discovery: DiscoveryResult | undefined
+  const endpointResults: EndpointValidationResult[] = []
+  let current: EndpointValidationResult | undefined
+
+  let sawTestnet = false
+  let sawMainnet = false
+  let paymentSucceeded = false
+  let sawMppEndpoint = false
+  let sawNonMppPaymentEndpoint = false
+
+  for await (const event of validateStream(options)) {
+    switch (event.phase) {
+      case 'discovery':
+        discovery = event.discovery
+        break
+      case 'endpoint':
+        current = {
+          method: event.endpoint.method,
+          path: event.endpoint.path,
+          challenge: [],
+          errorHandling: [],
+          payment: [],
+        }
+        endpointResults.push(current)
+        break
+      case 'challenge':
+        if (current) current.challenge = event.results
+        if (event.isMpp) {
+          sawMppEndpoint = true
+          if (event.isTestnet) sawTestnet = true
+          else sawMainnet = true
+        }
+        if (event.isNonMppPayment) sawNonMppPaymentEndpoint = true
+        break
+      case 'errorHandling':
+        if (current) current.errorHandling = event.results
+        break
+      case 'payment':
+        if (current) current.payment = event.results
+        if (event.succeeded) paymentSucceeded = true
+        break
+    }
   }
 
   const summary = { passed: 0, failed: 0, warnings: 0, skipped: 0 }
+  if (discovery) {
+    for (const r of discovery.checks) {
+      if (r.severity === 'pass') summary.passed++
+      else if (r.severity === 'fail') summary.failed++
+      else if (r.severity === 'warn') summary.warnings++
+      else if (r.severity === 'skip') summary.skipped++
+    }
+  }
   for (const ep of endpointResults) {
     for (const r of [...ep.challenge, ...ep.errorHandling, ...ep.payment]) {
       if (r.severity === 'pass') summary.passed++
@@ -148,12 +205,8 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
       else if (r.severity === 'skip') summary.skipped++
     }
   }
-  for (const r of discovery.checks) {
-    if (r.severity === 'pass') summary.passed++
-    else if (r.severity === 'fail') summary.failed++
-    else if (r.severity === 'warn') summary.warnings++
-    else if (r.severity === 'skip') summary.skipped++
-  }
+
+  if (!discovery) throw new Error('Discovery phase did not complete')
 
   return {
     url: baseUrl,

@@ -1,6 +1,6 @@
 import { Cli, z } from 'incur'
 
-import { validate as validateCore } from '../../validation/core.js'
+import { validate as validateCore, validateStream } from '../../validation/core.js'
 import { pc } from '../utils.js'
 import type { Counts } from './helpers.js'
 import { printResults, printSection } from './helpers.js'
@@ -30,73 +30,108 @@ const validate = Cli.create('validate', {
     outputJson: 'j',
   },
   async run(c) {
-    const result = await validateCore({
-      url: c.args.url,
-      endpoint: c.options.endpoint,
-      body: c.options.body,
-      query: c.options.query,
-      verbose: c.options.verbose > 0,
-      yes: c.options.yes,
-    })
-
+    // JSON mode: batch everything
     if (c.options.outputJson) {
+      const result = await validateCore({
+        url: c.args.url,
+        endpoint: c.options.endpoint,
+        body: c.options.body,
+        query: c.options.query,
+        verbose: c.options.verbose > 0,
+        yes: c.options.yes,
+      })
       console.log(JSON.stringify(result, null, 2))
       const noEndpoints = result.endpoints.length === 0 && !c.options.endpoint
       if (result.summary.failed > 0 || !result.discovery.found || noEndpoints) process.exit(1)
       return
     }
 
-    // Human-readable output
-    console.log(`\n${pc.bold('mppx validate')} ${pc.dim(result.url)}\n`)
+    // Streaming human-readable output
+    const baseUrl = c.args.url.replace(/\/$/, '').replace(/\/openapi\.json$/i, '')
+    console.log(`\n${pc.bold('mppx validate')} ${pc.dim(baseUrl)}\n`)
 
-    // Discovery
-    printSection('Discovery (/openapi.json)')
     const counts: Counts = { passed: 0, failed: 0, warnings: 0, skipped: 0 }
-    printResults(result.discovery.checks, counts)
+    let sawMppEndpoint = false
+    let sawNonMppPaymentEndpoint = false
+    let sawTestnet = false
+    let sawMainnet = false
+    let paymentSucceeded = false
+    let discoveryFound = false
+    let endpointCount = 0
 
-    if (!result.discovery.found && !c.options.endpoint) {
-      console.log('')
-      console.log(pc.yellow('  No discovery document found.'))
-      console.log(
-        pc.dim(
-          '  MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.',
-        ),
-      )
-      console.log(
-        pc.dim('  To test a specific endpoint: mppx validate <url> --endpoint POST:/your/path'),
-      )
-      console.log('')
-      process.exit(1)
-    }
-
-    if (result.discovery.endpoints.length === 0 && !c.options.endpoint && result.discovery.found) {
-      console.log(pc.dim('  Use --endpoint to specify endpoints manually.'))
-      console.log('')
-      process.exit(1)
-    }
-
-    // Endpoints
-    for (const ep of result.endpoints) {
-      printSection(`${ep.method} ${ep.path}`)
-
-      if (ep.challenge.length > 0) {
-        console.log(pc.dim('  Challenge'))
-        printResults(ep.challenge, counts)
-      }
-
-      if (ep.errorHandling.length > 0) {
-        console.log(pc.dim('  Error Handling'))
-        printResults(ep.errorHandling, counts)
-      }
-
-      if (ep.payment.length > 0) {
-        console.log(pc.dim('  Payment'))
-        printResults(ep.payment, counts)
+    for await (const event of validateStream({
+      url: c.args.url,
+      endpoint: c.options.endpoint,
+      body: c.options.body,
+      query: c.options.query,
+      verbose: c.options.verbose > 0,
+      yes: c.options.yes,
+    })) {
+      switch (event.phase) {
+        case 'discovery':
+          printSection('Discovery (/openapi.json)')
+          printResults(event.results, counts)
+          discoveryFound = event.discovery.found
+          if (!discoveryFound && !c.options.endpoint) {
+            console.log('')
+            console.log(pc.yellow('  No discovery document found.'))
+            console.log(
+              pc.dim(
+                '  MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.',
+              ),
+            )
+            console.log(
+              pc.dim(
+                '  To test a specific endpoint: mppx validate <url> --endpoint POST:/your/path',
+              ),
+            )
+            console.log('')
+            process.exit(1)
+          }
+          if (event.discovery.endpoints.length === 0 && !c.options.endpoint && discoveryFound) {
+            console.log(pc.dim('  Use --endpoint to specify endpoints manually.'))
+            console.log('')
+            process.exit(1)
+          }
+          break
+        case 'endpoint':
+          endpointCount++
+          printSection(`${event.endpoint.method} ${event.endpoint.path}`)
+          break
+        case 'challenge':
+          console.log(pc.dim('  Challenge'))
+          printResults(event.results, counts)
+          if (event.isMpp) {
+            sawMppEndpoint = true
+            if (event.isTestnet) sawTestnet = true
+            else sawMainnet = true
+          }
+          if (event.isNonMppPayment) sawNonMppPaymentEndpoint = true
+          break
+        case 'errorHandling':
+          console.log(pc.dim('  Error Handling'))
+          printResults(event.results, counts)
+          break
+        case 'payment':
+          console.log(pc.dim('  Payment'))
+          printResults(event.results, counts)
+          if (event.succeeded) paymentSucceeded = true
+          break
       }
     }
 
     // Summary
-    printSummary(counts, result.flags, result.endpoints.length)
+    printSummary(
+      counts,
+      {
+        sawMppEndpoint,
+        sawNonMppPaymentEndpoint,
+        sawTestnet,
+        sawMainnet,
+        paymentSucceeded,
+      },
+      endpointCount,
+    )
   },
 })
 
