@@ -1,12 +1,14 @@
-import { type Address, createClient, http } from 'viem'
+import { type Address, type Chain, createClient, erc20Abi, http } from 'viem'
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts'
-import { waitForTransactionReceipt } from 'viem/actions'
+import { readContract, waitForTransactionReceipt } from 'viem/actions'
+import * as viemChains from 'viem/chains'
 import { Actions } from 'viem/tempo'
 import { tempoModerato, tempo as tempoMainnetChain } from 'viem/tempo/chains'
 
 import * as Challenge from '../../Challenge.js'
 import * as Mppx from '../../client/Mppx.js'
 import * as Constants from '../../Constants.js'
+import { evm as evmMethods } from '../../evm/client/index.js'
 import * as Receipt from '../../Receipt.js'
 import { tempo as tempoMethods } from '../../tempo/client/index.js'
 import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
@@ -61,6 +63,44 @@ async function resolveWalletAddress(): Promise<string | undefined> {
   } catch {
     return undefined
   }
+}
+
+async function fetchEvmTokenInfo(
+  chain: Chain,
+  token: Address,
+  account: Address,
+): Promise<{ balance: bigint; symbol: string | undefined }> {
+  const client = createClient({ chain, transport: http() })
+  const [balance, symbol] = await Promise.all([
+    readContract(client, {
+      address: token,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [account],
+    }),
+    readContract(client, { address: token, abi: erc20Abi, functionName: 'symbol' }).catch(
+      () => undefined,
+    ),
+  ])
+  return { balance, symbol: symbol ?? undefined }
+}
+
+async function resolveEvmMethods(): Promise<import('../../Method.js').AnyClient[]> {
+  const account = await resolveAccount()
+  // Known assets provide EIP-712 domain metadata (token name/version) needed for EIP-3009 signing
+  const { assets } = await import('../../evm/client/index.js')
+  const knownCurrencies = [
+    ...Object.values(assets.base),
+    ...Object.values(assets.baseSepolia),
+    ...Object.values(assets.celo),
+    ...Object.values(assets.celoSepolia),
+  ]
+  return [...evmMethods({ account, currencies: knownCurrencies })]
+}
+
+function resolveEvmChain(chainId: number): Chain | undefined {
+  const all = Object.values(viemChains) as Chain[]
+  return all.find((c) => c.id === chainId)
 }
 
 function methodSetupHint(challenge: Challenge.Challenge): string {
@@ -171,7 +211,10 @@ export async function validatePaymentFlow(
   // Try each challenge method (skip testnet challenge already handled above)
   const loaded = await loadConfig().catch(() => undefined)
   const isInteractive = process.stdin.isTTY ?? false
-  const supportedPaymentMethods: Set<string> = new Set([Constants.Methods.tempo])
+  const supportedPaymentMethods: Set<string> = new Set([
+    Constants.Methods.tempo,
+    Constants.Methods.evm,
+  ])
 
   for (const challenge of challenges) {
     if (challenge === tempoTestnetChallenge) continue
@@ -207,21 +250,43 @@ export async function validatePaymentFlow(
         continue
       }
 
-      // Pre-flight balance check
+      // Pre-flight balance check and chain resolution
       let insufficientBalance = false
       let tokenSymbol: string | undefined
-      if (requiredAmount && currency) {
+      let paymentChain: Chain | undefined
+      if (challenge.method === Constants.Methods.tempo) {
+        paymentChain = tempoMainnetChain
+      } else if (challenge.method === Constants.Methods.evm) {
+        const chainId = methodDetails?.chainId as number | undefined
+        if (chainId) paymentChain = resolveEvmChain(chainId)
+      }
+
+      if (requiredAmount && currency && paymentChain) {
         try {
-          const client = createClient({ chain: tempoMainnetChain, transport: http() })
-          const info = await fetchTokenInfo(client, currency as Address, walletAddress as Address)
-          tokenSymbol = info.symbol
-          if (info.balance < requiredAmount) {
+          let balance: bigint
+          if (challenge.method === Constants.Methods.tempo) {
+            const client = createClient({ chain: tempoMainnetChain, transport: http() })
+            const info = await fetchTokenInfo(client, currency as Address, walletAddress as Address)
+            balance = info.balance
+            tokenSymbol = info.symbol
+          } else {
+            const info = await fetchEvmTokenInfo(
+              paymentChain,
+              currency as Address,
+              walletAddress as Address,
+            )
+            balance = info.balance
+            tokenSymbol = info.symbol
+          }
+          if (balance < requiredAmount) {
             const requiredDisplay = `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
-            const balanceDisplay = `$${(Number(info.balance) / 10 ** info.decimals).toFixed(2)}`
+            const balanceDisplay = `$${(Number(balance) / 10 ** decimals).toFixed(2)}`
+            const symbol = tokenSymbol ?? 'tokens'
             results.push(
               skip(
                 tag,
-                `insufficient balance (have ${balanceDisplay}, need ${requiredDisplay} ${info.symbol})`,
+                `insufficient balance (have ${balanceDisplay}, need ${requiredDisplay} ${symbol} on ${paymentChain.name})`,
+                `Fund wallet ${walletAddress} with at least ${requiredDisplay} ${symbol} on ${paymentChain.name}.`,
               ),
             )
             insufficientBalance = true
@@ -237,18 +302,23 @@ export async function validatePaymentFlow(
         ? `$${(Number(requiredAmount) / 10 ** decimals).toFixed(2)}`
         : 'unknown amount'
       const tokenDisplay = tokenSymbol ?? (currency?.length === 3 ? currency.toUpperCase() : '')
-      const chainName = tempoMainnetChain.name
+      const chainName = paymentChain?.name
 
-      if (walletAddress && verbose) console.log(pc.dim(`    Using wallet: ${walletAddress}`))
+      if (walletAddress) console.log(pc.dim(`    Using wallet: ${walletAddress}`))
 
-      if (!options?.yes && !isInteractive) {
+      if (paymentChain?.testnet) {
+        console.log(
+          pc.dim(
+            `    Auto-approved: ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''}${chainName ? ` on ${chainName}` : ''} (testnet)`,
+          ),
+        )
+      } else if (!options?.yes && !isInteractive) {
         results.push(skip(tag, 'non-interactive mode, use --yes to approve'))
         continue
-      }
-      if (!options?.yes) {
+      } else if (!options?.yes) {
         console.log('')
         const ok = await confirm(
-          `  ${pc.yellow('Pay')} ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''} on ${chainName}. Continue?`,
+          `  ${pc.yellow('Pay')} ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''}${chainName ? ` on ${chainName}` : ''}. Continue?`,
           false,
         )
         if (!ok) {
@@ -258,7 +328,7 @@ export async function validatePaymentFlow(
       } else {
         console.log(
           pc.dim(
-            `    Auto-approved: ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''} on ${chainName}`,
+            `    Auto-approved: ${amountDisplay}${tokenDisplay ? ` ${tokenDisplay}` : ''}${chainName ? ` on ${chainName}` : ''}`,
           ),
         )
       }
@@ -268,28 +338,37 @@ export async function validatePaymentFlow(
       let createCredentialFn: ((response: Response) => Promise<string>) | undefined
       let plugin: import('../plugins/plugin.js').Plugin | undefined
 
-      const resolved = resolvePlugin(challenge, loaded?.config)
-      plugin = resolved.plugin
-      const directMethod = resolved.method
-      if (!plugin && !directMethod) {
-        results.push(skip(tag, methodSetupHint(challenge)))
-        continue
-      }
-      if (plugin) {
+      if (challenge.method === Constants.Methods.evm) {
         try {
-          const pluginResult = await plugin.setup({
-            challenge,
-            options: { network: 'mainnet' },
-            methodOpts: {},
-          })
-          methods = pluginResult.methods
-          createCredentialFn = pluginResult.createCredential
+          methods = await resolveEvmMethods()
         } catch (error) {
           results.push(skip(tag, (error as Error).message))
           continue
         }
       } else {
-        methods = [directMethod!]
+        const resolved = resolvePlugin(challenge, loaded?.config)
+        plugin = resolved.plugin
+        const directMethod = resolved.method
+        if (!plugin && !directMethod) {
+          results.push(skip(tag, methodSetupHint(challenge)))
+          continue
+        }
+        if (plugin) {
+          try {
+            const pluginResult = await plugin.setup({
+              challenge,
+              options: { network: 'mainnet' },
+              methodOpts: {},
+            })
+            methods = pluginResult.methods
+            createCredentialFn = pluginResult.createCredential
+          } catch (error) {
+            results.push(skip(tag, (error as Error).message))
+            continue
+          }
+        } else {
+          methods = [directMethod!]
+        }
       }
 
       // Create credential and send
@@ -326,7 +405,7 @@ export async function validatePaymentFlow(
         fetchHeaders,
         fetchBody,
         verbose,
-        tempoMainnetChain,
+        paymentChain,
       )
     } finally {
       flush()
@@ -344,7 +423,7 @@ async function sendAndValidateResponse(
   baseHeaders: Record<string, string>,
   fetchBody: string | undefined,
   verbose: boolean,
-  explorerChain?: import('viem').Chain | undefined,
+  explorerChain?: Chain | undefined,
 ): Promise<CheckResult[]> {
   let paymentResponse: Response
   try {

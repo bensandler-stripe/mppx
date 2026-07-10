@@ -26,6 +26,7 @@ export type ValidateOptions = {
   yes?: boolean | undefined
   skipPayment?: boolean | undefined
   discoveryPath?: string | undefined
+  onPaymentResults?: (results: CheckResult[]) => void
 }
 
 export type DiscoveryResult = {
@@ -72,7 +73,13 @@ export type ValidateEvent =
       isMalformedChallenge: boolean
     }
   | { phase: 'errorHandling'; endpoint: EndpointSpec; results: CheckResult[] }
-  | { phase: 'payment'; endpoint: EndpointSpec; results: CheckResult[]; succeeded: boolean }
+  | {
+      phase: 'payment'
+      endpoint: EndpointSpec
+      results: CheckResult[]
+      succeeded: boolean
+      body?: string | undefined
+    }
 
 /** Streams validation results as each phase completes. */
 export async function* validateStream(options: ValidateOptions): AsyncGenerator<ValidateEvent> {
@@ -147,6 +154,7 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
           body: effectiveBody,
           query: options.query,
           yes: options.yes,
+          onResults: options.onPaymentResults,
         })
         const succeeded = paymentResults.some(
           (r) => r.severity === 'pass' && r.label === 'Payment: successful',
