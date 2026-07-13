@@ -1,3 +1,6 @@
+import type { Chain } from 'viem'
+import * as viemChains from 'viem/chains'
+
 import { validateChallenge, validateErrorHandling } from '../cli/validate/challenge.js'
 import {
   buildUrl,
@@ -25,6 +28,7 @@ export type ValidateOptions = {
   verbose?: boolean | undefined
   yes?: boolean | undefined
   skipPayment?: boolean | undefined
+  interactive?: boolean | undefined
   discoveryPath?: string | undefined
   onPaymentResults?: (results: CheckResult[]) => void
 }
@@ -50,14 +54,7 @@ export type ValidateResult = {
   discovery: DiscoveryResult
   endpoints: EndpointValidationResult[]
   summary: { passed: number; failed: number; warnings: number; skipped: number }
-  flags: {
-    sawMppEndpoint: boolean
-    sawNonMppPaymentEndpoint: boolean
-    sawMalformedChallenge: boolean
-    sawTestnet: boolean
-    sawMainnet: boolean
-    paymentSucceeded: boolean
-  }
+  suggestions: string[]
 }
 
 export type ValidateEvent =
@@ -69,8 +66,10 @@ export type ValidateEvent =
       results: CheckResult[]
       isMpp: boolean
       isTestnet: boolean
+      isMainnet: boolean
       isNonMppPayment: boolean
       isMalformedChallenge: boolean
+      methods: string[]
     }
   | { phase: 'errorHandling'; endpoint: EndpointSpec; results: CheckResult[] }
   | {
@@ -102,26 +101,25 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
       }
     }
 
-    const { results: challengeResults, resolvedBody } = await validateChallenge(
-      baseUrl,
-      endpoint,
-      verbose,
-      {
-        body,
-        query: options.query,
-        discoveryDoc: discovery.doc ?? undefined,
-      },
-    )
+    const {
+      results: challengeResults,
+      resolvedBody,
+      challenges: parsedChallenges,
+    } = await validateChallenge(baseUrl, endpoint, verbose, {
+      body,
+      query: options.query,
+      discoveryDoc: discovery.doc ?? undefined,
+    })
     const effectiveBody = resolvedBody ?? body
     const isMpp = challengeResults.some(
       (r) => r.severity === 'pass' && r.label === 'Challenge parseable',
     )
-    const isTestnet = challengeResults.some(
-      (r) =>
-        r.severity === 'pass' &&
-        r.label.endsWith('Valid currency address') &&
-        r.detail === 'testnet',
-    )
+    const chainIds = (parsedChallenges ?? [])
+      .filter((ch) => ch.method !== 'stripe')
+      .map((ch) => ((ch.request as Record<string, unknown>).methodDetails as any)?.chainId)
+      .filter((id): id is number => typeof id === 'number')
+    const isTestnet = chainIds.some(chainIsTestnet)
+    const isMainnet = chainIds.some((id) => !chainIsTestnet(id))
     const isNonMppPayment =
       !isMpp && challengeResults.some((r) => r.label === 'Not an MPP endpoint')
     const hasPaymentScheme = challengeResults.some(
@@ -132,14 +130,18 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
     )
     const isMalformedChallenge = !isMpp && hasPaymentScheme && challengeFailed
 
+    const methods = parsedChallenges?.map((c) => c.method) ?? []
+
     yield {
       phase: 'challenge',
       endpoint,
       results: challengeResults,
       isMpp,
       isTestnet,
+      isMainnet,
       isNonMppPayment,
       isMalformedChallenge,
+      methods,
     }
 
     if (isMpp) {
@@ -155,6 +157,8 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
           body: effectiveBody,
           query: options.query,
           yes: options.yes,
+          silent: !onResults,
+          interactive: options.interactive,
           ...(onResults && { onResults }),
         })
         const succeeded = paymentResults.some(
@@ -175,10 +179,6 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
 
   let sawTestnet = false
   let sawMainnet = false
-  let paymentSucceeded = false
-  let sawMppEndpoint = false
-  let sawNonMppPaymentEndpoint = false
-  let sawMalformedChallenge = false
 
   for await (const event of validateStream(options)) {
     switch (event.phase) {
@@ -198,19 +198,15 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
       case 'challenge':
         if (current) current.challenge = event.results
         if (event.isMpp) {
-          sawMppEndpoint = true
           if (event.isTestnet) sawTestnet = true
-          else sawMainnet = true
+          if (event.isMainnet) sawMainnet = true
         }
-        if (event.isNonMppPayment) sawNonMppPaymentEndpoint = true
-        if (event.isMalformedChallenge) sawMalformedChallenge = true
         break
       case 'errorHandling':
         if (current) current.errorHandling = event.results
         break
       case 'payment':
         if (current) current.payment = event.results
-        if (event.succeeded) paymentSucceeded = true
         break
     }
   }
@@ -235,20 +231,50 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
 
   if (!discovery) throw new Error('Discovery phase did not complete')
 
+  const suggestions = computeSuggestions(endpointResults, { sawTestnet, sawMainnet })
+
   return {
     url: baseUrl,
     discovery,
     endpoints: endpointResults,
     summary,
-    flags: {
-      sawMppEndpoint,
-      sawNonMppPaymentEndpoint,
-      sawMalformedChallenge,
-      sawTestnet,
-      sawMainnet,
-      paymentSucceeded,
-    },
+    suggestions,
   }
+}
+
+function computeSuggestions(
+  endpoints: EndpointValidationResult[],
+  flags: { sawTestnet: boolean; sawMainnet: boolean },
+): string[] {
+  const steps: string[] = []
+  const allResults = endpoints.flatMap((ep) => [...ep.challenge, ...ep.payment])
+
+  const sawCryptoMainnet = flags.sawMainnet
+  const sawCryptoTestnet = flags.sawTestnet
+  const sawStripeLive = allResults.some(
+    (r) => r.label.includes('[stripe]') && r.label.includes('livemode'),
+  )
+
+  if (sawCryptoMainnet && !sawCryptoTestnet) {
+    steps.push(
+      'Validate your testnet server to test without real funds (Tempo wallets are automatically provisioned).',
+    )
+  } else if (sawCryptoTestnet && !sawCryptoMainnet) {
+    steps.push('Validate your mainnet server to confirm real payments work end-to-end.')
+  }
+  if (sawStripeLive) {
+    steps.push(
+      'Validate your testmode Stripe server to test card payments end-to-end (auto-pays with test card).',
+    )
+  }
+
+  return steps
+}
+
+const allChains = Object.values(viemChains) as Chain[]
+
+function chainIsTestnet(chainId: number): boolean {
+  return allChains.find((c) => c.id === chainId)?.testnet === true
 }
 
 async function runDiscovery(baseUrl: string, options: ValidateOptions): Promise<DiscoveryResult> {
