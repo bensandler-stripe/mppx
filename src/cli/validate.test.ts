@@ -677,3 +677,97 @@ describe('validate: multi-challenge', () => {
     expect(output).toContain('Amount is valid integer string (Got: 1.50)')
   })
 })
+
+describe('validate: payment methods coverage', () => {
+  test(
+    'every method in Constants.Methods produces a payment result',
+    { timeout: 15_000 },
+    async () => {
+      const methods = Object.values(Constants.Methods)
+      const challenges = methods.map((method) => ({
+        id: `${method}-id`,
+        realm: 'localhost',
+        method,
+        intent: 'charge',
+        request: { amount: '100', currency: 'usd', methodDetails: {} },
+        expires: new Date(Date.now() + 300_000).toISOString(),
+      })) as Challenge.Challenge[]
+
+      const header = challenges.map((c) => Challenge.serialize(c)).join(', ')
+      const server = await testServer((req, res) => {
+        const url = new URL(req.url!, 'http://localhost')
+        if (url.pathname === '/openapi.json') {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(
+            JSON.stringify({
+              openapi: '3.1.0',
+              info: { title: 'T', version: '1' },
+              paths: {
+                '/api/test': {
+                  post: { 'x-payment-info': { amount: '100' }, responses: { '402': {} } },
+                },
+              },
+            }),
+          )
+          return
+        }
+        res.writeHead(402, { [Constants.Headers.wwwAuthenticate]: header })
+        res.end()
+      })
+      const { output } = await serve(['validate', server.url, '--outputJson', '--yes'])
+      const jsonStart = output.indexOf('{')
+      const jsonEnd = output.lastIndexOf('}')
+      const result = JSON.parse(output.slice(jsonStart, jsonEnd + 1))
+      const paymentLabels = result.endpoints[0].payment.map((r: { label: string }) => r.label)
+      for (const method of methods) {
+        expect(paymentLabels.some((l: string) => l.includes(`[${method}]`))).toBe(true)
+      }
+    },
+  )
+})
+
+describe('validate: JSON mode', () => {
+  function mainnetChallenge() {
+    return makeChallenge({
+      request: {
+        amount: '10000',
+        currency: '0x20c0000000000000000000000000000000000000',
+        recipient: '0x1234567890123456789012345678901234567890',
+        methodDetails: { chainId: 4217 },
+      },
+    } as Partial<Challenge.Challenge>)
+  }
+
+  function parseJson(output: string) {
+    const jsonStart = output.indexOf('{')
+    const jsonEnd = output.lastIndexOf('}')
+    return JSON.parse(output.slice(jsonStart, jsonEnd + 1))
+  }
+
+  test('does not prompt (non-interactive)', { timeout: 15_000 }, async () => {
+    const server = await mppServer(mainnetChallenge())
+    const { output } = await serve(['validate', server.url, '--outputJson'])
+    const result = parseJson(output)
+    const allPayment = result.endpoints.flatMap((ep: { payment: unknown[] }) => ep.payment)
+    expect(allPayment.length).toBeGreaterThan(0)
+    expect(allPayment.every((r: { severity: string }) => r.severity === 'skip')).toBe(true)
+  })
+
+  test('no console leaks before JSON', { timeout: 15_000 }, async () => {
+    const server = await mppServer(mainnetChallenge())
+    const { output } = await serve(['validate', server.url, '--outputJson', '--yes'])
+    const jsonStart = output.indexOf('{')
+    expect(jsonStart).toBeGreaterThanOrEqual(0)
+    const beforeJson = output.slice(0, jsonStart)
+    expect(beforeJson).not.toContain('Using wallet')
+    expect(beforeJson).not.toContain('Auto-approved')
+    expect(beforeJson).not.toContain('Attempting')
+  })
+
+  test('includes suggestions', { timeout: 15_000 }, async () => {
+    const server = await mppServer(mainnetChallenge())
+    const { output } = await serve(['validate', server.url, '--outputJson', '--yes'])
+    const result = parseJson(output)
+    expect(Array.isArray(result.suggestions)).toBe(true)
+  })
+})

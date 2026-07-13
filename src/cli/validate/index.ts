@@ -39,6 +39,7 @@ const validate = Cli.create('validate', {
         query: c.options.query,
         verbose: c.options.verbose > 0,
         yes: c.options.yes,
+        interactive: false,
       })
       console.log(JSON.stringify(result, null, 2))
       const noEndpoints = result.endpoints.length === 0 && !c.options.endpoint
@@ -67,6 +68,7 @@ const validate = Cli.create('validate', {
       query: c.options.query,
       verbose: c.options.verbose > 0,
       yes: c.options.yes,
+      interactive: !!process.stdin.isTTY,
       onPaymentResults: (results) => printResults(results, counts),
     })) {
       switch (event.phase) {
@@ -106,7 +108,7 @@ const validate = Cli.create('validate', {
           if (event.isMpp) {
             sawMppEndpoint = true
             if (event.isTestnet) sawTestnet = true
-            else sawMainnet = true
+            if (event.isMainnet) sawMainnet = true
           }
           if (event.isNonMppPayment) sawNonMppPaymentEndpoint = true
           if (event.isMalformedChallenge) sawMalformedChallenge = true
@@ -208,13 +210,13 @@ function printSummary(
   if (flags.paymentSucceeded && flags.sawTestnet && !flags.sawMainnet) {
     console.log('')
     console.log(
-      pc.dim('  Tip: validate your mainnet server too to confirm real payments work end-to-end.'),
+      pc.dim('  Tip: also validate your mainnet server to confirm real payments work end-to-end.'),
     )
   } else if (flags.sawMainnet && !flags.sawTestnet) {
     console.log('')
     console.log(
       pc.dim(
-        '  Tip: validate a testnet server too for free. This CLI automatically provisions and funds a testnet wallet for testing.',
+        '  Tip: also validate your testnet server for free. This CLI automatically provisions and funds a testnet wallet for testing.',
       ),
     )
   }

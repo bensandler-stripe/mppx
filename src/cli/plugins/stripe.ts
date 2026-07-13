@@ -19,12 +19,13 @@ export function stripe() {
       const stripeOpts = parseOptions(
         z.object({
           paymentMethod: z.string(),
+          secretKey: z.string().optional(),
         }),
         methodOpts,
-        ['paymentMethod'],
+        ['paymentMethod', 'secretKey'],
       )
 
-      const stripeSecretKey = process.env.MPPX_STRIPE_SECRET_KEY
+      const stripeSecretKey = stripeOpts.secretKey ?? process.env.MPPX_STRIPE_SECRET_KEY
       if (!stripeSecretKey)
         throw new Errors.IncurError({
           code: 'MISSING_ENV',

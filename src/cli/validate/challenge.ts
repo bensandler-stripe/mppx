@@ -1,6 +1,8 @@
+import type { Chain } from 'viem'
+import * as viemChains from 'viem/chains'
+
 import * as Challenge from '../../Challenge.js'
 import * as Constants from '../../Constants.js'
-import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
 import * as x402Header from '../../x402/Header.js'
 import { pc } from '../utils.js'
 import { buildUrl, extractRequestBodyFromDiscovery } from './discovery.js'
@@ -15,13 +17,13 @@ import {
   warn,
 } from './helpers.js'
 
+const allChains = Object.values(viemChains) as Chain[]
+
 function detectTestnet(challenge: Challenge.Challenge): boolean {
   const request = challenge.request as Record<string, unknown>
-  const methodDetails = request.methodDetails as Record<string, unknown> | undefined
-  if (typeof methodDetails?.chainId === 'number') {
-    return methodDetails.chainId !== tempoChainIds.mainnet
-  }
-  return false
+  const md = request.methodDetails as Record<string, unknown> | undefined
+  if (typeof md?.chainId !== 'number') return false
+  return allChains.find((c) => c.id === md.chainId)?.testnet === true
 }
 
 export async function validateChallenge(
@@ -279,7 +281,8 @@ function validateMethodFields(
     validateTempoFields(request, tag, results, challenge)
   else if (challenge.method === Constants.Methods.stripe)
     validateStripeFields(request, tag, results)
-  else if (challenge.method === Constants.Methods.evm) validateEvmFields(request, tag, results)
+  else if (challenge.method === Constants.Methods.evm)
+    validateEvmFields(challenge, request, tag, results)
 }
 
 function validateTempoFields(
@@ -384,6 +387,7 @@ function validateStripeFields(
 }
 
 function validateEvmFields(
+  challenge: Challenge.Challenge,
   request: Record<string, unknown>,
   tag: string,
   results: CheckResult[],
@@ -401,7 +405,8 @@ function validateEvmFields(
   }
 
   if (isValidAddress(request.currency)) {
-    results.push(check(`${tag}Valid currency address`))
+    const network = detectTestnet(challenge) ? 'testnet' : 'mainnet'
+    results.push(check(`${tag}Valid currency address`, network))
   } else {
     results.push(
       fail(
