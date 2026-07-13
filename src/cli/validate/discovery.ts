@@ -4,7 +4,8 @@ import { fetchWithTimeout, HTTP_METHODS } from './helpers.js'
 export async function fetchDiscoveryDoc(
   baseUrl: string,
 ): Promise<{ doc: unknown; raw: string } | { error: string }> {
-  const url = new URL('/openapi.json', baseUrl).href
+  // Trailing slash makes URL treat baseUrl as a directory, so relative resolution appends rather than replaces the last segment.
+  const url = new URL('openapi.json', baseUrl.replace(/\/?$/, '/')).href
   try {
     const response = await fetchWithTimeout(url, {})
     if (!response.ok) return { error: `HTTP ${response.status}` }
@@ -91,7 +92,9 @@ export function buildUrl(baseUrl: string, endpoint: EndpointSpec, query?: string
   if (endpoint.parameters) {
     path = substitutePathParams(path, endpoint.parameters)
   }
-  let url = new URL(path, baseUrl).href
+  // Strip leading slash so URL resolves relative to baseUrl's path, not root.
+  const relativePath = path.startsWith('/') ? path.slice(1) : path
+  let url = new URL(relativePath, baseUrl.replace(/\/?$/, '/')).href
   if (query) {
     const u = new URL(url)
     for (const q of query) {

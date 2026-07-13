@@ -70,6 +70,25 @@ describe('buildUrl', () => {
       expect(buildUrl('http://localhost', endpoint)).toBe('http://localhost/simple')
     })
   })
+
+  describe('subpath base URL', () => {
+    test('preserves base URL subpath', () => {
+      const endpoint = { method: 'POST', path: '/plan' }
+      expect(buildUrl('http://localhost/mpp', endpoint)).toBe('http://localhost/mpp/plan')
+    })
+
+    test('preserves nested subpath', () => {
+      const endpoint = { method: 'GET', path: '/users/123' }
+      expect(buildUrl('http://localhost/api/v1', endpoint)).toBe(
+        'http://localhost/api/v1/users/123',
+      )
+    })
+
+    test('works with trailing slash on base', () => {
+      const endpoint = { method: 'POST', path: '/plan' }
+      expect(buildUrl('http://localhost/mpp/', endpoint)).toBe('http://localhost/mpp/plan')
+    })
+  })
 })
 
 describe('extractEndpointsFromDiscovery', () => {

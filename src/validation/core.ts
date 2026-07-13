@@ -6,7 +6,11 @@ import {
   fetchDiscoveryDoc,
 } from '../cli/validate/discovery.js'
 import type { CheckResult, EndpointSpec, PathParameter } from '../cli/validate/helpers.js'
-import { parseEndpointArg, resolveBodyForEndpoint } from '../cli/validate/helpers.js'
+import {
+  isValidIntegerAmount,
+  parseEndpointArg,
+  resolveBodyForEndpoint,
+} from '../cli/validate/helpers.js'
 import { validatePaymentFlow } from '../cli/validate/payment.js'
 import { validate as validateDiscoveryDoc } from '../discovery/Validate.js'
 
@@ -48,6 +52,7 @@ export type ValidateResult = {
   flags: {
     sawMppEndpoint: boolean
     sawNonMppPaymentEndpoint: boolean
+    sawMalformedChallenge: boolean
     sawTestnet: boolean
     sawMainnet: boolean
     paymentSucceeded: boolean
@@ -64,6 +69,7 @@ export type ValidateEvent =
       isMpp: boolean
       isTestnet: boolean
       isNonMppPayment: boolean
+      isMalformedChallenge: boolean
     }
   | { phase: 'errorHandling'; endpoint: EndpointSpec; results: CheckResult[] }
   | { phase: 'payment'; endpoint: EndpointSpec; results: CheckResult[]; succeeded: boolean }
@@ -105,10 +111,19 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
     )
     const isTestnet = challengeResults.some(
       (r) =>
-        r.severity === 'pass' && r.label === 'Valid currency address' && r.detail === 'testnet',
+        r.severity === 'pass' &&
+        r.label.endsWith('Valid currency address') &&
+        r.detail === 'testnet',
     )
     const isNonMppPayment =
       !isMpp && challengeResults.some((r) => r.label === 'Not an MPP endpoint')
+    const hasPaymentScheme = challengeResults.some(
+      (r) => r.severity === 'pass' && r.label === 'WWW-Authenticate header present',
+    )
+    const challengeFailed = challengeResults.some(
+      (r) => r.severity === 'fail' && r.label === 'Challenge parseable',
+    )
+    const isMalformedChallenge = !isMpp && hasPaymentScheme && challengeFailed
 
     yield {
       phase: 'challenge',
@@ -117,6 +132,7 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
       isMpp,
       isTestnet,
       isNonMppPayment,
+      isMalformedChallenge,
     }
 
     if (isMpp) {
@@ -153,6 +169,7 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
   let paymentSucceeded = false
   let sawMppEndpoint = false
   let sawNonMppPaymentEndpoint = false
+  let sawMalformedChallenge = false
 
   for await (const event of validateStream(options)) {
     switch (event.phase) {
@@ -177,6 +194,7 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
           else sawMainnet = true
         }
         if (event.isNonMppPayment) sawNonMppPaymentEndpoint = true
+        if (event.isMalformedChallenge) sawMalformedChallenge = true
         break
       case 'errorHandling':
         if (current) current.errorHandling = event.results
@@ -213,7 +231,14 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
     discovery,
     endpoints: endpointResults,
     summary,
-    flags: { sawMppEndpoint, sawNonMppPaymentEndpoint, sawTestnet, sawMainnet, paymentSucceeded },
+    flags: {
+      sawMppEndpoint,
+      sawNonMppPaymentEndpoint,
+      sawMalformedChallenge,
+      sawTestnet,
+      sawMainnet,
+      paymentSucceeded,
+    },
   }
 }
 
@@ -224,17 +249,23 @@ async function runDiscovery(baseUrl: string, options: ValidateOptions): Promise<
   let found = false
   let valid = false
 
-  const candidates = options.discoveryPath
-    ? [options.discoveryPath]
-    : ['/openapi.json', '/api/openapi.json']
+  // Try the user's path first, then root, then /api.
+  const origin = new URL(baseUrl).origin
+  let candidates: string[]
+  if (options.discoveryPath) {
+    candidates = [
+      new URL(options.discoveryPath, baseUrl + '/').href.replace(/\/openapi\.json$/i, ''),
+    ]
+  } else {
+    candidates = [baseUrl, origin, `${origin}/api`]
+    candidates = [...new Set(candidates)]
+  }
   let discoveryResult: Awaited<ReturnType<typeof fetchDiscoveryDoc>> | undefined
   const attemptedErrors: string[] = []
-  for (const path of candidates) {
-    const candidateUrl = new URL(path, baseUrl).href.replace(/\/$/, '')
-    const baseForCandidate = candidateUrl.replace(/\/openapi\.json$/i, '')
-    discoveryResult = await fetchDiscoveryDoc(baseForCandidate)
+  for (const candidate of candidates) {
+    discoveryResult = await fetchDiscoveryDoc(candidate)
     if ('error' in discoveryResult) {
-      attemptedErrors.push(`${path}: ${discoveryResult.error}`)
+      attemptedErrors.push(`${candidate}/openapi.json: ${discoveryResult.error}`)
     } else {
       break
     }
@@ -261,6 +292,9 @@ async function runDiscovery(baseUrl: string, options: ValidateOptions): Promise<
         detail: `${errors.length} error(s)`,
         severity: 'fail',
       })
+      for (const e of errors) {
+        checks.push({ label: e.message, detail: e.path, severity: 'fail' })
+      }
     } else {
       valid = true
       checks.push({ label: 'Valid OpenAPI structure', severity: 'pass' })
@@ -281,8 +315,8 @@ async function runDiscovery(baseUrl: string, options: ValidateOptions): Promise<
 
     const NO_AMOUNT = BigInt('999999999999999999')
     endpoints.sort((a, b) => {
-      const aAmt = a.amount ? BigInt(a.amount) : NO_AMOUNT
-      const bAmt = b.amount ? BigInt(b.amount) : NO_AMOUNT
+      const aAmt = isValidIntegerAmount(a.amount) ? BigInt(a.amount!) : NO_AMOUNT
+      const bAmt = isValidIntegerAmount(b.amount) ? BigInt(b.amount!) : NO_AMOUNT
       return aAmt < bAmt ? -1 : aAmt > bAmt ? 1 : 0
     })
 
