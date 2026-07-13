@@ -150,11 +150,12 @@ export async function* validateStream(options: ValidateOptions): AsyncGenerator<
       yield { phase: 'errorHandling', endpoint, results: errorResults }
 
       if (!options.skipPayment) {
+        const onResults = options.onPaymentResults
         const paymentResults = await validatePaymentFlow(baseUrl, endpoint, verbose, {
           body: effectiveBody,
           query: options.query,
           yes: options.yes,
-          onResults: options.onPaymentResults,
+          ...(onResults && { onResults }),
         })
         const succeeded = paymentResults.some(
           (r) => r.severity === 'pass' && r.label === 'Payment: successful',

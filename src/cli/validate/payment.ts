@@ -8,7 +8,6 @@ import { tempoModerato, tempo as tempoMainnetChain } from 'viem/tempo/chains'
 import * as Challenge from '../../Challenge.js'
 import * as Mppx from '../../client/Mppx.js'
 import * as Constants from '../../Constants.js'
-import { evm as evmMethods } from '../../evm/client/index.js'
 import * as Receipt from '../../Receipt.js'
 import { tempo as tempoMethods } from '../../tempo/client/index.js'
 import { chainId as tempoChainIds } from '../../tempo/internal/defaults.js'
@@ -83,19 +82,6 @@ async function fetchEvmTokenInfo(
     ),
   ])
   return { balance, symbol: symbol ?? undefined }
-}
-
-async function resolveEvmMethods(): Promise<import('../../Method.js').AnyClient[]> {
-  const account = await resolveAccount()
-  // Known assets provide EIP-712 domain metadata (token name/version) needed for EIP-3009 signing
-  const { assets } = await import('../../evm/client/index.js')
-  const knownCurrencies = [
-    ...Object.values(assets.base),
-    ...Object.values(assets.baseSepolia),
-    ...Object.values(assets.celo),
-    ...Object.values(assets.celoSepolia),
-  ]
-  return [...evmMethods({ account, currencies: knownCurrencies })]
 }
 
 function resolveEvmChain(chainId: number): Chain | undefined {
@@ -338,37 +324,28 @@ export async function validatePaymentFlow(
       let createCredentialFn: ((response: Response) => Promise<string>) | undefined
       let plugin: import('../plugins/plugin.js').Plugin | undefined
 
-      if (challenge.method === Constants.Methods.evm) {
+      const resolved = resolvePlugin(challenge, loaded?.config)
+      plugin = resolved.plugin
+      const directMethod = resolved.method
+      if (!plugin && !directMethod) {
+        results.push(skip(tag, methodSetupHint(challenge)))
+        continue
+      }
+      if (plugin) {
         try {
-          methods = await resolveEvmMethods()
+          const pluginResult = await plugin.setup({
+            challenge,
+            options: { network: 'mainnet' },
+            methodOpts: {},
+          })
+          methods = pluginResult.methods
+          createCredentialFn = pluginResult.createCredential
         } catch (error) {
           results.push(skip(tag, (error as Error).message))
           continue
         }
       } else {
-        const resolved = resolvePlugin(challenge, loaded?.config)
-        plugin = resolved.plugin
-        const directMethod = resolved.method
-        if (!plugin && !directMethod) {
-          results.push(skip(tag, methodSetupHint(challenge)))
-          continue
-        }
-        if (plugin) {
-          try {
-            const pluginResult = await plugin.setup({
-              challenge,
-              options: { network: 'mainnet' },
-              methodOpts: {},
-            })
-            methods = pluginResult.methods
-            createCredentialFn = pluginResult.createCredential
-          } catch (error) {
-            results.push(skip(tag, (error as Error).message))
-            continue
-          }
-        } else {
-          methods = [directMethod!]
-        }
+        methods = [directMethod!]
       }
 
       // Create credential and send
