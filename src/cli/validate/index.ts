@@ -67,6 +67,7 @@ const validate = Cli.create('validate', {
       query: c.options.query,
       verbose: c.options.verbose > 0,
       yes: c.options.yes,
+      onPaymentResults: (results) => printResults(results, counts),
     })) {
       switch (event.phase) {
         case 'discovery':
@@ -115,8 +116,6 @@ const validate = Cli.create('validate', {
           printResults(event.results, counts)
           break
         case 'payment':
-          console.log(pc.dim('  Payment'))
-          printResults(event.results, counts)
           if (event.succeeded) paymentSucceeded = true
           break
       }
