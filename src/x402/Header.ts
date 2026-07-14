@@ -68,7 +68,7 @@ const parsePaymentRequiredEnvelope = (value: unknown): PaymentRequiredEnvelope =
 
   const resource = ResourceInfoSchema.parse(record.resource)
   const extensions =
-    record.extensions === undefined ? undefined : ExtensionsSchema.parse(record.extensions)
+    record.extensions !== undefined ? ExtensionsSchema.safeParse(record.extensions).data : undefined
 
   return {
     accepts: record.accepts,

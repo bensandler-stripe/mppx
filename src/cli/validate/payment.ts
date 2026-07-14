@@ -26,6 +26,7 @@ import {
   fetchWithTimeout,
   formatBytes,
   isValidIntegerAmount,
+  parseHeaders,
   skip,
   warn,
 } from './helpers.js'
@@ -129,6 +130,7 @@ export async function validatePaymentFlow(
   options: {
     body?: string | undefined
     query?: string[] | undefined
+    extraHeaders?: string[] | undefined
     yes?: boolean | undefined
     silent?: boolean | undefined
     interactive?: boolean | undefined
@@ -137,7 +139,7 @@ export async function validatePaymentFlow(
 ): Promise<CheckResult[]> {
   const results: CheckResult[] = []
   const url = buildUrl(baseUrl, endpoint, options.query)
-  const fetchHeaders: Record<string, string> = {}
+  const fetchHeaders: Record<string, string> = parseHeaders(options.extraHeaders)
   let fetchBody: string | undefined
   if (options.body) {
     fetchBody = options.body
@@ -293,6 +295,7 @@ type PaymentContext = {
   options: {
     body?: string | undefined
     query?: string[] | undefined
+    extraHeaders?: string[] | undefined
     yes?: boolean | undefined
     silent?: boolean | undefined
     interactive?: boolean | undefined
