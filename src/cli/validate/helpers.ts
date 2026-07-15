@@ -154,3 +154,13 @@ export function resolveBodyForEndpoint(
   } catch {}
   return rawBody
 }
+
+export function parseHeaders(raw: string[] | undefined): Record<string, string> {
+  if (!raw) return {}
+  const headers: Record<string, string> = {}
+  for (const h of raw) {
+    const idx = h.indexOf(':')
+    if (idx > 0) headers[h.slice(0, idx).trim().toLowerCase()] = h.slice(idx + 1).trim()
+  }
+  return headers
+}

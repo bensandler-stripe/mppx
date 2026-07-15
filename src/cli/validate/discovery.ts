@@ -77,10 +77,19 @@ export function extractRequestBodyFromDiscovery(
 
   if (jsonContent.example) return JSON.stringify(jsonContent.example)
 
-  const schema = jsonContent.schema as Record<string, unknown> | undefined
+  if (jsonContent.examples && typeof jsonContent.examples === 'object') {
+    const first = Object.values(jsonContent.examples as Record<string, unknown>)[0] as
+      | Record<string, unknown>
+      | undefined
+    if (first?.value) return JSON.stringify(first.value)
+  }
+
+  let schema = jsonContent.schema as Record<string, unknown> | undefined
+  const seen = new Set<string>()
+  schema = resolveRef(schema, doc, seen)
   if (!schema || schema.type !== 'object') return undefined
 
-  const result = generateValueFromSchema(schema)
+  const result = generateValueFromSchema(schema, doc, seen)
   if (result && typeof result === 'object' && Object.keys(result as object).length > 0) {
     return JSON.stringify(result)
   }
@@ -149,34 +158,60 @@ function substitutePathParams(path: string, params: PathParameter[]): string {
   })
 }
 
-function generateValueFromSchema(schema: Record<string, unknown>): unknown {
-  if (schema.const !== undefined) return schema.const
-  if (schema.example !== undefined) return schema.example
-  if (schema.default !== undefined) return schema.default
+// Dereferences a JSON Schema $ref (e.g. "#/components/schemas/Foo") against the root doc.
+function resolveRef(
+  schema: Record<string, unknown> | undefined,
+  doc: Record<string, unknown>,
+  seen?: Set<string>,
+): Record<string, unknown> | undefined {
+  if (!schema || typeof schema.$ref !== 'string') return schema
+  if (seen?.has(schema.$ref)) return undefined
+  const path = schema.$ref.replace(/^#\//, '').split('/')
+  let resolved: unknown = doc
+  for (const segment of path) {
+    if (resolved && typeof resolved === 'object') resolved = (resolved as any)[segment]
+    else return undefined
+  }
+  return resolved as Record<string, unknown> | undefined
+}
 
-  switch (schema.type) {
+// Generates a plausible value for a JSON Schema node (required fields only for objects).
+function generateValueFromSchema(
+  schema: Record<string, unknown>,
+  doc: Record<string, unknown>,
+  seen?: Set<string>,
+): unknown {
+  const resolved = resolveRef(schema, doc, seen) ?? schema
+  if (resolved.const !== undefined) return resolved.const
+  if (resolved.example !== undefined) return resolved.example
+  if (resolved.default !== undefined) return resolved.default
+
+  switch (resolved.type) {
     case 'string': {
-      if (schema.enum && Array.isArray(schema.enum)) return schema.enum[0]
-      if (schema.format === 'email') return 'test@example.com'
-      if (schema.format === 'uuid') return '00000000-0000-0000-0000-000000000000'
-      if (schema.format === 'uri' || schema.format === 'url') return 'https://example.com'
+      if (resolved.enum && Array.isArray(resolved.enum)) return resolved.enum[0]
+      if (resolved.format === 'email') return 'test@example.com'
+      if (resolved.format === 'uuid') return '00000000-0000-0000-0000-000000000000'
+      if (resolved.format === 'uri' || resolved.format === 'url') return 'https://example.com'
+      if (resolved.format === 'date') return '2026-01-01'
+      if (resolved.pattern === '^\\d{5}(?:-\\d{4})?$') return '10001'
+      if (resolved.pattern === '^[A-Z]{2}$') return 'US'
       return 'test'
     }
     case 'number':
     case 'integer':
-      return (schema.minimum as number) ?? 1
+      return (resolved.minimum as number) ?? 1
     case 'boolean':
       return true
     case 'array':
       return []
     case 'object': {
-      const properties = schema.properties as Record<string, Record<string, unknown>> | undefined
+      const properties = resolved.properties as Record<string, Record<string, unknown>> | undefined
       if (!properties) return {}
-      const required = (schema.required as string[]) || []
+      const required = (resolved.required as string[]) || []
       const obj: Record<string, unknown> = {}
       for (const key of required) {
         const prop = properties[key]
-        if (prop) obj[key] = generateValueFromSchema(prop)
+        if (prop) obj[key] = generateValueFromSchema(prop, doc, seen)
       }
       return obj
     }

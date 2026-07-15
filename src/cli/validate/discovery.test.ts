@@ -304,4 +304,132 @@ describe('extractRequestBodyFromDiscovery', () => {
     })
     expect(JSON.parse(body!)).toEqual({ model: 'gpt-4' })
   })
+
+  test('resolves $ref to components/schemas', () => {
+    const doc = {
+      paths: {
+        '/api/orders': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/OrderRequest' },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          OrderRequest: {
+            type: 'object',
+            required: ['product', 'quantity'],
+            properties: {
+              product: { type: 'string', example: 'widget' },
+              quantity: { type: 'integer', minimum: 1 },
+            },
+          },
+        },
+      },
+    }
+    const body = extractRequestBodyFromDiscovery(doc as Record<string, unknown>, {
+      method: 'POST',
+      path: '/api/orders',
+    })
+    expect(JSON.parse(body!)).toEqual({ product: 'widget', quantity: 1 })
+  })
+
+  test('resolves nested $ref in properties', () => {
+    const doc = {
+      paths: {
+        '/api/orders': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/OrderRequest' },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          OrderRequest: {
+            type: 'object',
+            required: ['customer'],
+            properties: {
+              customer: { $ref: '#/components/schemas/Customer' },
+            },
+          },
+          Customer: {
+            type: 'object',
+            required: ['name', 'email'],
+            properties: {
+              name: { type: 'string' },
+              email: { type: 'string', format: 'email' },
+            },
+          },
+        },
+      },
+    }
+    const body = extractRequestBodyFromDiscovery(doc as Record<string, unknown>, {
+      method: 'POST',
+      path: '/api/orders',
+    })
+    expect(JSON.parse(body!)).toEqual({ customer: { name: 'test', email: 'test@example.com' } })
+  })
+
+  test('uses first named example from examples map', () => {
+    const doc = {
+      paths: {
+        '/api/test': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  examples: {
+                    basic: { value: { prompt: 'hello', model: 'gpt-4' } },
+                    advanced: { value: { prompt: 'complex', model: 'gpt-4', temp: 0.9 } },
+                  },
+                  schema: { type: 'object' },
+                },
+              },
+            },
+          },
+        },
+      },
+    }
+    const body = extractRequestBodyFromDiscovery(doc as Record<string, unknown>, {
+      method: 'POST',
+      path: '/api/test',
+    })
+    expect(JSON.parse(body!)).toEqual({ prompt: 'hello', model: 'gpt-4' })
+  })
+
+  test('returns undefined for unresolvable $ref', () => {
+    const doc = {
+      paths: {
+        '/api/test': {
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/DoesNotExist' },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: { schemas: {} },
+    }
+    const body = extractRequestBodyFromDiscovery(doc as Record<string, unknown>, {
+      method: 'POST',
+      path: '/api/test',
+    })
+    expect(body).toBeUndefined()
+  })
 })
