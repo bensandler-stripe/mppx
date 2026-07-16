@@ -3,11 +3,34 @@ import { afterEach, describe, expect, test, vi } from 'vp/test'
 
 import {
   fetchTokenInfo,
+  isAgentEnvironment,
   networkRpcUrls,
   resolveChain,
   resolveFundingNetwork,
   resolveRpcUrl,
 } from './utils.js'
+
+describe('isAgentEnvironment', () => {
+  test('detects Claude Code', () => {
+    expect(isAgentEnvironment({ CLAUDECODE: '1' })).toBe(true)
+  })
+
+  test('detects Codex by exact env var', () => {
+    expect(isAgentEnvironment({ CODEX: '1' })).toBe(true)
+  })
+
+  test('detects Codex wrapper env vars', () => {
+    expect(isAgentEnvironment({ CODEX_CI: '1' })).toBe(true)
+    expect(isAgentEnvironment({ CODEX_SANDBOX: 'seatbelt' })).toBe(true)
+    expect(isAgentEnvironment({ CODEX_THREAD_ID: '019f6bc0-b80f-7061-ac1b-7af8ba1ea513' })).toBe(
+      true,
+    )
+  })
+
+  test('ignores empty and unrelated env vars', () => {
+    expect(isAgentEnvironment({ CODEX_CI: '', CI: '1' })).toBe(false)
+  })
+})
 
 describe('resolveRpcUrl', () => {
   afterEach(() => {

@@ -179,6 +179,16 @@ export function parseMethodOpts(raw: string | string[] | undefined): Record<stri
   return result
 }
 
+/** Returns true when the CLI is running inside an agent wrapper that prefers machine-readable output. */
+export function isAgentEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.CLAUDECODE) return true
+  for (const [key, value] of Object.entries(env)) {
+    if (!value) continue
+    if (key === 'CODEX' || key.startsWith('CODEX_')) return true
+  }
+  return false
+}
+
 export function isTempoAccount(accountName: string): boolean {
   return accountName.startsWith('tempo:')
 }

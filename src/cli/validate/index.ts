@@ -1,9 +1,10 @@
 import { Cli, z } from 'incur'
 
 import { validate as validateCore, validateStream } from '../../validation/core.js'
-import { pc } from '../utils.js'
+import { isAgentEnvironment, pc } from '../utils.js'
 import type { Counts } from './helpers.js'
 import { printResults, printSection } from './helpers.js'
+import { missingDiscoverySuggestion } from './messages.js'
 
 const validate = Cli.create('validate', {
   description: 'Validate an MPP server implementation end-to-end',
@@ -22,7 +23,10 @@ const validate = Cli.create('validate', {
     header: z.array(z.string()).optional().describe('Request header (key:value, repeatable)'),
     verbose: z.number().default(0).meta({ count: true }).describe('Verbosity level'),
     yes: z.boolean().default(false).describe('Auto-approve mainnet payments'),
-    outputJson: z.boolean().default(false).describe('Output results as JSON'),
+    outputJson: z
+      .boolean()
+      .default(false)
+      .describe('Output results as JSON (auto-enabled in known agent environments)'),
   }),
   alias: {
     endpoint: 'e',
@@ -32,8 +36,10 @@ const validate = Cli.create('validate', {
     outputJson: 'j',
   },
   async run(c) {
+    const outputJson = c.options.outputJson || isAgentEnvironment()
+
     // JSON mode: batch everything
-    if (c.options.outputJson) {
+    if (outputJson) {
       const result = await validateCore({
         url: c.args.url,
         endpoint: c.options.endpoint,
@@ -82,17 +88,9 @@ const validate = Cli.create('validate', {
           discoveryFound = event.discovery.found
           if (!discoveryFound && !c.options.endpoint) {
             console.log('')
-            console.log(pc.yellow('  No discovery document found.'))
-            console.log(
-              pc.dim(
-                '  MPP servers must serve an OpenAPI document at /openapi.json with x-payment-info extensions.',
-              ),
-            )
-            console.log(
-              pc.dim(
-                '  To test a specific endpoint: mppx validate <url> --endpoint POST:/your/path',
-              ),
-            )
+            const [headline, ...lines] = missingDiscoverySuggestion.split('\n')
+            console.log(pc.yellow(`  ${headline}`))
+            for (const line of lines) console.log(line ? pc.dim(`  ${line}`) : '')
             console.log('')
             process.exit(1)
           }
