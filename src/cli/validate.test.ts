@@ -6,6 +6,10 @@ import * as Http from '~test/Http.js'
 import * as Challenge from '../Challenge.js'
 import * as Constants from '../Constants.js'
 import * as Receipt from '../Receipt.js'
+import { missingDiscoverySuggestion } from './validate/messages.js'
+
+// Keep validate tests out of JSON mode by default, even when the suite runs inside an agent.
+const isAgentEnvironmentMock = vi.fn(() => false)
 
 // Keep CLI orchestration tests independent of the public Tempo RPC and faucet.
 vi.doMock('viem/tempo', async () => {
@@ -28,11 +32,20 @@ vi.doMock('viem/actions', async () => {
   }
 })
 
+vi.doMock('./utils.js', async () => {
+  const actual = await vi.importActual<typeof import('./utils.js')>('./utils.js')
+  return {
+    ...actual,
+    isAgentEnvironment: isAgentEnvironmentMock,
+  }
+})
+
 // Auto-cleanup for test servers
 const servers: Http.TestServer[] = []
 afterEach(() => {
   servers.forEach((s) => s.close())
   servers.length = 0
+  isAgentEnvironmentMock.mockReturnValue(false)
 })
 
 async function testServer(handler: http.RequestListener) {
@@ -167,11 +180,8 @@ describe('validate: discovery', () => {
     })
     const { output, exitCode } = await serve(['validate', server.url])
     expect(exitCode).toBe(1)
-    expect(output).toContain('No discovery document found.')
-    expect(output).toContain('MPP servers must serve an OpenAPI document at /openapi.json')
-    expect(output).toContain(
-      'To test a specific endpoint: mppx validate <url> --endpoint POST:/your/path',
-    )
+    for (const line of missingDiscoverySuggestion.split('\n').filter(Boolean))
+      expect(output).toContain(line)
   })
 
   test('strips /openapi.json from input URL', { timeout: 15_000 }, async () => {
@@ -774,6 +784,19 @@ describe('validate: JSON mode', () => {
     expect(allPayment.every((r: { severity: string }) => r.severity === 'skip')).toBe(true)
   })
 
+  test(
+    'auto-enables JSON output when an agent environment is detected',
+    { timeout: 15_000 },
+    async () => {
+      const server = await mppServer(mainnetChallenge())
+      isAgentEnvironmentMock.mockReturnValue(true)
+      const { output } = await serve(['validate', server.url])
+      const result = parseJson(output)
+      expect(result.summary.skipped).toBeGreaterThan(0)
+      expect(result.endpoints.length).toBeGreaterThan(0)
+    },
+  )
+
   test('no console leaks before JSON', { timeout: 15_000 }, async () => {
     const server = await mppServer(mainnetChallenge())
     const { output } = await serve(['validate', server.url, '--outputJson', '--yes'])
@@ -790,5 +813,15 @@ describe('validate: JSON mode', () => {
     const { output } = await serve(['validate', server.url, '--outputJson', '--yes'])
     const result = parseJson(output)
     expect(Array.isArray(result.suggestions)).toBe(true)
+  })
+
+  test('includes missing discovery suggestions', { timeout: 15_000 }, async () => {
+    const server = await testServer((_req, res) => {
+      res.writeHead(404)
+      res.end()
+    })
+    const { output } = await serve(['validate', server.url, '--outputJson'])
+    const result = parseJson(output)
+    expect(result.suggestions).toEqual([missingDiscoverySuggestion])
   })
 })

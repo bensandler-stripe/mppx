@@ -14,6 +14,7 @@ import {
   parseEndpointArg,
   resolveBodyForEndpoint,
 } from '../cli/validate/helpers.js'
+import { missingDiscoverySuggestion } from '../cli/validate/messages.js'
 import { validatePaymentFlow } from '../cli/validate/payment.js'
 import { validate as validateDiscoveryDoc } from '../discovery/Validate.js'
 
@@ -237,7 +238,7 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
 
   if (!discovery) throw new Error('Discovery phase did not complete')
 
-  const suggestions = computeSuggestions(endpointResults, { sawTestnet, sawMainnet })
+  const suggestions = computeSuggestions(endpointResults, discovery, { sawTestnet, sawMainnet })
 
   return {
     url: baseUrl,
@@ -250,10 +251,15 @@ export async function validate(options: ValidateOptions): Promise<ValidateResult
 
 function computeSuggestions(
   endpoints: EndpointValidationResult[],
+  discovery: DiscoveryResult,
   flags: { sawTestnet: boolean; sawMainnet: boolean },
 ): string[] {
   const steps: string[] = []
   const allResults = endpoints.flatMap((ep) => [...ep.challenge, ...ep.payment])
+
+  if (!discovery.found) {
+    steps.push(missingDiscoverySuggestion)
+  }
 
   const sawCryptoMainnet = flags.sawMainnet
   const sawCryptoTestnet = flags.sawTestnet
