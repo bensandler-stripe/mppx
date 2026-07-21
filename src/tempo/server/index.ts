@@ -4,5 +4,9 @@ export * as Ws from '../session/server/Ws.js'
 export { charge } from './Charge.js'
 export { sessionLegacy, settleLegacy, tempo } from './Methods.js'
 export { session, settle, settleBatch } from '../session/server/Session.js'
-export type { SettlementSchedule } from '../session/server/Session.js'
+export type {
+  OnSessionSettlement,
+  SessionSettlementContext,
+  SettlementSchedule,
+} from '../session/server/Session.js'
 export { renew as renewSubscription, subscription } from './Subscription.js'

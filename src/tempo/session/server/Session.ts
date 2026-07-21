@@ -44,10 +44,16 @@ import {
 import { respondToSessionCredential } from './RequestState.js'
 import { applyVerifiedHttpAccounting, chargeSessionChannel } from './Settlement.js'
 import { maybeSettleScheduled } from './Settlement.js'
-import { resolveSettlementSchedule, type SettlementSchedule } from './Settlement.js'
+import {
+  resolveSettlementSchedule,
+  type OnSessionSettlement,
+  type SettlementSchedule,
+} from './Settlement.js'
 
 /** Server-side automatic settlement schedule. */
 export type { SettlementSchedule } from './Settlement.js'
+/** Server-side settlement event hook types. */
+export type { OnSessionSettlement, SessionSettlementContext } from './Settlement.js'
 /** Server-side hook types for request-identity channel bootstrap. */
 export type {
   ResolveSessionChannelId,
@@ -312,6 +318,7 @@ export function session<const parameters extends session.Parameters>(
     unitType,
   } = parameters
   const settlementSchedule = resolveSettlementSchedule(parameters.settlementSchedule, decimals)
+  const onSessionSettlement = parameters.onSessionSettlement
 
   const store = ChannelStore.fromStore(rawStore)
   const lastOnChainVerified = new Map<Hex, number>()
@@ -424,6 +431,7 @@ export function session<const parameters extends session.Parameters>(
         feeToken: parameters.feeToken,
         lastOnChainVerified,
         minVoucherDelta: context.minVoucherDelta,
+        onSessionSettlement,
         payload,
         store,
       })
@@ -444,6 +452,7 @@ export function session<const parameters extends session.Parameters>(
             ...(typeof context.feePayer === 'object' ? { feePayer: context.feePayer } : {}),
             feePayerPolicy: parameters.feePayerPolicy,
             feeToken: parameters.feeToken,
+            onSessionSettlement,
             schedule: settlementSchedule,
             store,
             channel,
@@ -521,6 +530,8 @@ export namespace session {
     chainId?: number | undefined
     /** TIP20EscrowChannel precompile address override. */
     escrowContract?: Address | undefined
+    /** Callback invoked after any on-chain settlement or close transaction is confirmed. */
+    onSessionSettlement?: OnSessionSettlement | undefined
     /** Server-owned automatic settlement cadence. Clients do not receive or control this schedule. */
     settlementSchedule?: SettlementSchedule | undefined
 
