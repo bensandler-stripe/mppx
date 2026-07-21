@@ -111,8 +111,76 @@ function canReadCommandStdin() {
 type ServiceRegistryService = Record<string, unknown>
 type ServiceRegistryEndpoint = Record<string, unknown>
 
+type DiscoveryFetchResult =
+  | { raw: string }
+  | { error: { code: string; message: string; exitCode: 1 } }
+
+const discoveryMaxSize = 10 * 1024 * 1024 // 10 MB
+
 function getString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
+}
+
+/** Returns the conventional discovery document URL for service base URL inputs. */
+function openApiUrlForBase(input: string): string | undefined {
+  const url = new URL(input)
+  if (url.pathname.endsWith('/openapi.json')) return undefined
+  if (url.pathname.endsWith('.json')) return undefined
+  return new URL('openapi.json', input.endsWith('/') ? input : `${input}/`).href
+}
+
+/** Fetches a candidate discovery document URL with CLI-friendly timeout and size errors. */
+async function fetchDiscoveryCandidate(input: string): Promise<DiscoveryFetchResult> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30_000)
+  let response: Response
+  try {
+    response = await globalThis.fetch(input, { signal: controller.signal })
+  } catch (error) {
+    clearTimeout(timeout)
+    const msg =
+      error instanceof DOMException && error.name === 'AbortError'
+        ? 'Request timed out after 30s'
+        : (error as Error).message
+    return {
+      error: {
+        code: 'DISCOVERY_FETCH_FAILED',
+        message: `Failed to fetch discovery document: ${msg}`,
+        exitCode: 1,
+      },
+    }
+  }
+  clearTimeout(timeout)
+  if (!response.ok) {
+    return {
+      error: {
+        code: 'DISCOVERY_FETCH_FAILED',
+        message: `Failed to fetch discovery document: HTTP ${response.status}`,
+        exitCode: 1,
+      },
+    }
+  }
+  const contentLength = response.headers.get('content-length')
+  if (contentLength && Number(contentLength) > discoveryMaxSize) {
+    return {
+      error: {
+        code: 'DISCOVERY_TOO_LARGE',
+        message: `Discovery document exceeds 10 MB limit`,
+        exitCode: 1,
+      },
+    }
+  }
+  const raw = await response.text()
+  if (raw.length > discoveryMaxSize) {
+    return {
+      error: {
+        code: 'DISCOVERY_TOO_LARGE',
+        message: `Discovery document exceeds 10 MB limit`,
+        exitCode: 1,
+      },
+    }
+  }
+  return { raw }
 }
 
 function getEndpoints(service: ServiceRegistryService): ServiceRegistryEndpoint[] {
@@ -1469,9 +1537,9 @@ const discover = Cli.create('discover', {
     },
   })
   .command('validate', {
-    description: 'Validate an OpenAPI discovery document from a file or URL',
+    description: 'Validate an OpenAPI discovery document from a file, document URL, or base URL',
     args: z.object({
-      input: z.string().describe('Path or URL to a discovery document'),
+      input: z.string().describe('Path, discovery document URL, or service base URL'),
     }),
     output: z.object({
       errorCount: z.number(),
@@ -1482,48 +1550,32 @@ const discover = Cli.create('discover', {
     async run(c) {
       const input = c.args.input
       let raw: string
+      let doc: unknown
       if (/^https?:\/\//.test(input)) {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 30_000)
-        let response: Response
+        const fetched = await fetchDiscoveryCandidate(input)
+        if ('error' in fetched) return c.error(fetched.error)
+        raw = fetched.raw
         try {
-          response = await globalThis.fetch(input, { signal: controller.signal })
+          doc = JSON.parse(raw)
         } catch (error) {
-          clearTimeout(timeout)
-          const msg =
-            error instanceof DOMException && error.name === 'AbortError'
-              ? 'Request timed out after 30s'
-              : (error as Error).message
-          return c.error({
-            code: 'DISCOVERY_FETCH_FAILED',
-            message: `Failed to fetch discovery document: ${msg}`,
-            exitCode: 1,
-          })
-        }
-        clearTimeout(timeout)
-        if (!response.ok) {
-          return c.error({
-            code: 'DISCOVERY_FETCH_FAILED',
-            message: `Failed to fetch discovery document: HTTP ${response.status}`,
-            exitCode: 1,
-          })
-        }
-        const maxSize = 10 * 1024 * 1024 // 10 MB
-        const contentLength = response.headers.get('content-length')
-        if (contentLength && Number(contentLength) > maxSize) {
-          return c.error({
-            code: 'DISCOVERY_TOO_LARGE',
-            message: `Discovery document exceeds 10 MB limit`,
-            exitCode: 1,
-          })
-        }
-        raw = await response.text()
-        if (raw.length > maxSize) {
-          return c.error({
-            code: 'DISCOVERY_TOO_LARGE',
-            message: `Discovery document exceeds 10 MB limit`,
-            exitCode: 1,
-          })
+          const fallbackUrl = openApiUrlForBase(input)
+          let parsedFallback = false
+          if (fallbackUrl) {
+            const fallback = await fetchDiscoveryCandidate(fallbackUrl)
+            if (!('error' in fallback)) {
+              try {
+                doc = JSON.parse(fallback.raw)
+                parsedFallback = true
+              } catch {}
+            }
+          }
+          if (!parsedFallback) {
+            return c.error({
+              code: 'DISCOVERY_INVALID_JSON',
+              message: `Invalid discovery JSON: ${(error as Error).message}`,
+              exitCode: 1,
+            })
+          }
         }
       } else {
         const resolved = path.resolve(input)
@@ -1535,17 +1587,15 @@ const discover = Cli.create('discover', {
           })
         }
         raw = fs.readFileSync(resolved, 'utf-8')
-      }
-
-      let doc: unknown
-      try {
-        doc = JSON.parse(raw)
-      } catch (error) {
-        return c.error({
-          code: 'DISCOVERY_INVALID_JSON',
-          message: `Invalid discovery JSON: ${(error as Error).message}`,
-          exitCode: 1,
-        })
+        try {
+          doc = JSON.parse(raw)
+        } catch (error) {
+          return c.error({
+            code: 'DISCOVERY_INVALID_JSON',
+            message: `Invalid discovery JSON: ${(error as Error).message}`,
+            exitCode: 1,
+          })
+        }
       }
 
       const issues = validateDiscovery(doc)

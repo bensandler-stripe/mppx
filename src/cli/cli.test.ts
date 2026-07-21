@@ -220,6 +220,48 @@ describe('discover validate', () => {
     },
   )
 
+  test('validates remote base URLs by fetching /openapi.json', { timeout: 20_000 }, async () => {
+    const body = JSON.stringify({
+      info: { title: 'Test', version: '1.0.0' },
+      openapi: '3.1.0',
+      paths: {
+        '/search': {
+          post: {
+            'x-payment-info': {
+              amount: '100',
+              intent: 'charge',
+              method: 'tempo',
+            },
+            requestBody: {
+              content: { 'application/json': { schema: { type: 'object' } } },
+            },
+            responses: {
+              '200': { description: 'OK' },
+              '402': { description: 'Payment Required' },
+            },
+          },
+        },
+      },
+    })
+    const server = await Http.createServer((req, res) => {
+      if (req.url === '/openapi.json') {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(body)
+        return
+      }
+      res.setHeader('Content-Type', 'text/html')
+      res.end('<!DOCTYPE html><html></html>')
+    })
+
+    try {
+      const { output, exitCode } = await serve(['discover', 'validate', server.url])
+      expect(exitCode).toBeUndefined()
+      expect(output).toContain('Discovery document is valid.')
+    } finally {
+      server.close()
+    }
+  })
+
   test(
     'rejects oversized discovery documents via content-length',
     { timeout: 20_000 },
