@@ -4,6 +4,8 @@ Multiple paid requests over a single payment channel, then close and settle. Dem
 
 Each paid HTTP response carries a `Payment-Receipt` header. For session routes, the receipt's `spent` and `units` fields reflect channel state after that request, which is what standalone clients should use for follow-up close flows.
 
+For recovery after a client restart, see the [Tempo Sessions design](../../../src/tempo/session/README.md).
+
 ## Setup
 
 ```bash
