@@ -5,6 +5,8 @@ import * as path from 'node:path'
 
 import { Errors } from 'incur'
 
+import { isTempoAccount } from './utils.js'
+
 const SERVICE_NAME = 'mppx'
 const defaultCommandTimeoutMs = 10_000
 
@@ -203,6 +205,48 @@ export function createKeychain(account = 'main') {
   }
 }
 
+/** Resolves a local CLI signer together with its durable account reference. */
+export async function resolveLocalAccount(name?: string) {
+  const { privateKeyToAccount } = await import('viem/accounts')
+
+  const envKey = process.env.MPPX_PRIVATE_KEY?.trim()
+  if (envKey)
+    return {
+      account: privateKeyToAccount(envKey as `0x${string}`),
+      source: 'environment' as const,
+    }
+
+  const accountName = resolveAccountName(name)
+  const key = await createKeychain(accountName).get()
+  if (key)
+    return {
+      account: privateKeyToAccount(key as `0x${string}`),
+      accountName,
+      source: 'keychain' as const,
+    }
+
+  throw new Error(`Account "${accountName}" not found.`)
+}
+
+/** Resolves an account supported by persistent CLI sessions. */
+export async function resolvePersistentAccount(name?: string) {
+  const accountName = resolveAccountName(name)
+  if (!process.env.MPPX_PRIVATE_KEY?.trim() && isTempoAccount(accountName))
+    throw new Errors.IncurError({
+      code: 'UNSUPPORTED_ACCOUNT',
+      message: 'Persistent sessions require an mppx account or MPPX_PRIVATE_KEY.',
+      exitCode: 2,
+    })
+  return resolveLocalAccount(name).catch((cause: unknown) => {
+    throw new Errors.IncurError({
+      code: 'ACCOUNT_NOT_FOUND',
+      message: cause instanceof Error ? cause.message : 'No account found.',
+      exitCode: 69,
+      ...(cause instanceof Error && { cause }),
+    })
+  })
+}
+
 /**
  * Resolve a CLI account to a viem `LocalAccount`.
  *
@@ -221,14 +265,5 @@ export function createKeychain(account = 'main') {
  * ```
  */
 export async function resolveAccount(name?: string) {
-  const { privateKeyToAccount } = await import('viem/accounts')
-
-  const envKey = process.env.MPPX_PRIVATE_KEY?.trim()
-  if (envKey) return privateKeyToAccount(envKey as `0x${string}`)
-
-  const accountName = resolveAccountName(name)
-  const key = await createKeychain(accountName).get()
-  if (key) return privateKeyToAccount(key as `0x${string}`)
-
-  throw new Error(`Account "${accountName}" not found.`)
+  return (await resolveLocalAccount(name)).account
 }

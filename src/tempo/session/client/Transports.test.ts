@@ -9,6 +9,7 @@ import type { ChannelEntry } from '../client/ChannelOps.js'
 import type { SessionContext } from '../client/CredentialState.js'
 import {
   createSessionReceipt,
+  formatNeedVoucherEvent,
   serializeSessionReceipt,
   tip20ChannelEscrow,
   type ChannelDescriptor,
@@ -18,6 +19,7 @@ import { initialState, type SessionState } from './Runtime.js'
 import {
   applyTopUpResult,
   closeHttpSession,
+  consumeSseSessionResponse,
   createActiveSocketSession,
   driveSseResponse,
   isExpectedSocketReceipt,
@@ -112,9 +114,15 @@ describe('HttpManagement', () => {
     })
   }
 
-  function receiptHeader(acceptedCumulative: bigint, spent: bigint) {
+  function receiptHeader(acceptedCumulative: bigint, spent: bigint, challengeId = 'challenge-1') {
     return serializeSessionReceipt(
-      createSessionReceipt({ acceptedCumulative, challengeId: 'challenge-1', channelId, spent }),
+      createSessionReceipt({
+        acceptedCumulative,
+        challengeId,
+        channelId,
+        spent,
+        txHash: `0x${'aa'.repeat(32)}`,
+      }),
     )
   }
 
@@ -139,9 +147,12 @@ describe('HttpManagement', () => {
       )
     })
 
-    test('strips resource query state from management URLs', () => {
+    test('preserves query state and strips fragments from management URLs', () => {
       expect(managementInput('https://example.test/resource?cursor=abc').toString()).toBe(
-        'https://example.test/resource',
+        'https://example.test/resource?cursor=abc',
+      )
+      expect(managementInput('https://example.test/resource?cursor=abc#result').toString()).toBe(
+        'https://example.test/resource?cursor=abc',
       )
     })
 
@@ -185,7 +196,7 @@ describe('HttpManagement', () => {
         return 'top-up-credential'
       })
       const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        expect(input.toString()).toBe('https://example.test/resource')
+        expect(input.toString()).toBe('https://example.test/resource?cursor=abc')
         expect(init?.method).toBe('POST')
         expect(authorizationHeader(init)).toBe('top-up-credential')
         return new Response(null, {
@@ -301,16 +312,20 @@ describe('HttpManagement', () => {
       const entry = channel()
       const retryChallenge = { ...challenge(), id: 'challenge-2' } as TempoSessionChallenge
       const setChallenge = vi.fn()
-      const createSessionCredential = vi.fn(async (challenge_) => {
+      const closeAmounts: string[] = []
+      const createSessionCredential = vi.fn(async (challenge_, context: SessionContext) => {
+        if (context.action !== 'close') throw new Error('expected close context')
+        closeAmounts.push(context.cumulativeAmountRaw!)
         return `close-${challenge_.id}`
       })
+      const resolveSignedCloseAmount = vi.fn(() => '6')
       const fetch = vi
         .fn()
         .mockResolvedValueOnce(response402(retryChallenge))
         .mockResolvedValueOnce(
           new Response(null, {
             status: 200,
-            headers: { [Constants.Headers.paymentReceipt]: receiptHeader(5n, 5n) },
+            headers: { [Constants.Headers.paymentReceipt]: receiptHeader(6n, 6n, 'challenge-2') },
           }),
         )
 
@@ -318,16 +333,69 @@ describe('HttpManagement', () => {
         createSessionCredential,
         fetch,
         lastUrl: 'https://example.test/resource',
+        resolveSignedCloseAmount,
         signedCloseAmount: '5',
         setChallenge,
         target: { challenge: challenge(), channel: entry, channelId },
       })
 
-      expect(receipt?.spent).toBe('5')
+      expect(receipt?.spent).toBe('6')
       expect(setChallenge).toHaveBeenCalledWith(retryChallenge)
+      expect(resolveSignedCloseAmount).toHaveBeenCalledOnce()
+      expect(resolveSignedCloseAmount).toHaveBeenCalledWith(retryChallenge)
+      expect(closeAmounts).toEqual(['5', '6'])
       expect(createSessionCredential).toHaveBeenCalledTimes(2)
       expect(createSessionCredential.mock.calls[1]?.[0]).toMatchObject({ id: retryChallenge.id })
       expect(authorizationHeader(fetch.mock.calls[1]?.[1])).toBe('close-challenge-2')
+    })
+
+    test('closeHttpSession rejects a receipt without settlement proof', async () => {
+      const receipt = serializeSessionReceipt(
+        createSessionReceipt({
+          acceptedCumulative: 5n,
+          challengeId: 'challenge-1',
+          channelId,
+          spent: 5n,
+        }),
+      )
+      await expect(
+        closeHttpSession({
+          createSessionCredential: async () => 'close-credential',
+          fetch: async () =>
+            new Response(null, {
+              headers: { [Constants.Headers.paymentReceipt]: receipt },
+            }),
+          lastUrl: 'https://example.test/resource',
+          signedCloseAmount: '5',
+          target: { challenge: challenge(), channel: channel(), channelId },
+        }),
+      ).rejects.toThrow('Session close response included a mismatched payment receipt.')
+    })
+
+    test('closeHttpSession rejects an invalid settlement transaction hash', async () => {
+      for (const txHash of ['0x1234', `0x${'gg'.repeat(32)}`]) {
+        const receipt = serializeSessionReceipt(
+          createSessionReceipt({
+            acceptedCumulative: 5n,
+            challengeId: 'challenge-1',
+            channelId,
+            spent: 5n,
+            txHash: txHash as Hex.Hex,
+          }),
+        )
+        await expect(
+          closeHttpSession({
+            createSessionCredential: async () => 'close-credential',
+            fetch: async () =>
+              new Response(null, {
+                headers: { [Constants.Headers.paymentReceipt]: receipt },
+              }),
+            lastUrl: 'https://example.test/resource',
+            signedCloseAmount: '5',
+            target: { challenge: challenge(), channel: channel(), channelId },
+          }),
+        ).rejects.toThrow('Session close response included a mismatched payment receipt.')
+      }
     })
 
     test('closeHttpSession includes problem detail and challenge header on failure', async () => {
@@ -747,6 +815,80 @@ describe('SseDriver', () => {
       await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce())
     },
   )
+
+  test('keeps voucher events bound to the challenge that opened the stream', async () => {
+    const channelId = `0x${'01'.repeat(32)}` as Hex.Hex
+    const token = '0x20c0000000000000000000000000000000000001' as Address
+    const payee = '0x0000000000000000000000000000000000000002' as Address
+    const descriptor: ChannelDescriptor = {
+      authorizedSigner: '0x0000000000000000000000000000000000000001',
+      expiringNonceHash: `0x${'03'.repeat(32)}` as Hex.Hex,
+      operator: '0x0000000000000000000000000000000000000000',
+      payee,
+      payer: '0x0000000000000000000000000000000000000001',
+      salt: `0x${'02'.repeat(32)}` as Hex.Hex,
+      token,
+    }
+    const makeChallenge = (id: string) =>
+      Challenge.from({
+        id,
+        intent: Constants.Intents.session,
+        method: Constants.Methods.tempo,
+        realm: 'example.test',
+        request: {
+          amount: '1',
+          currency: token,
+          methodDetails: { chainId: 4217, escrowContract: tip20ChannelEscrow },
+          recipient: payee,
+          unitType: 'request',
+        },
+      }) as TempoSessionChallenge
+    const streamChallenge = makeChallenge('challenge-1')
+    let currentChallenge = streamChallenge
+    const createSessionCredential = vi.fn(async () => 'Payment credential')
+    const channel: ChannelEntry = {
+      chainId: 4217,
+      channelId,
+      cumulativeAmount: 1n,
+      deposit: 10n,
+      descriptor,
+      escrow: tip20ChannelEscrow,
+      opened: true,
+    }
+    const response = new Response(
+      formatNeedVoucherEvent({
+        acceptedCumulative: '1',
+        channelId,
+        deposit: '10',
+        requiredCumulative: '2',
+      }),
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    )
+    const stream = consumeSseSessionResponse('https://example.test/stream', response, undefined, {
+      acceptReceipt() {},
+      assertVoucherWithinLocalLimit() {},
+      createSessionCredential,
+      async doFetch() {
+        throw new Error('unexpected resource fetch')
+      },
+      fetch: vi.fn(async () => new Response(null, { status: 204 })),
+      getChallenge: () => currentChallenge,
+      getChannel: () => channel,
+      managementInput: (input) => input,
+      async topUpIfNeeded() {},
+    })
+
+    currentChallenge = makeChallenge('challenge-2')
+    const frames: string[] = []
+    for await (const frame of stream) frames.push(frame)
+
+    expect(frames).toEqual([])
+    expect(createSessionCredential).toHaveBeenCalledOnce()
+    expect(createSessionCredential).toHaveBeenCalledWith(
+      streamChallenge,
+      expect.objectContaining({ action: 'voucher', cumulativeAmountRaw: '2' }),
+    )
+  })
 })
 
 describe('WsDriver', () => {

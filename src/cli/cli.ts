@@ -13,6 +13,7 @@ import { normalizeHeaders } from '../client/internal/Fetch.js'
 import * as Mppx from '../client/Mppx.js'
 import * as Constants from '../Constants.js'
 import { validate as validateDiscovery } from '../discovery/Validate.js'
+import { isTempoSessionChallenge } from '../tempo/session/client/Transports.js'
 import { createDefaultStore, createKeychain, resolveAccountName } from './account.js'
 import { loadConfig, resolveAcceptPayment, selectChallenge } from './internal.js'
 import type { Plugin } from './plugins/plugin.js'
@@ -21,6 +22,9 @@ import {
   readTempoKeystore,
   resolveTempoAccount,
 } from './plugins/tempo.js'
+import sessions, { sessionCommandError } from './sessions/commands.js'
+import { runPersistentSessionRequest } from './sessions/request.js'
+import { createSessionRegistry } from './sessions/store.js'
 import {
   chainName,
   confirm,
@@ -244,6 +248,15 @@ const cli = Cli.create('mppx', {
       .string()
       .optional()
       .describe('RPC endpoint, defaults to public RPC for chain (env: MPPX_RPC_URL)'),
+    session: z
+      .string()
+      .optional()
+      .default('auto')
+      .refine(
+        (value) => value === 'auto' || value === 'new' || /^0x[0-9a-fA-F]{64}$/.test(value),
+        'Expected auto, new, or a 32-byte channel ID',
+      )
+      .describe('Session selection: auto, new, or channel ID'),
     silent: z.boolean().default(false).describe('Silent mode (suppress progress and info)'),
     slippage: z.number().optional().describe('Tempo auto-swap max slippage percentage'),
     userAgent: z
@@ -347,6 +360,9 @@ const cli = Cli.create('mppx', {
     }
 
     try {
+      const methodOpts = parseMethodOpts(c.options.methodOpt)
+      const sessionRegistry = createSessionRegistry()
+
       const init: RequestInit = { redirect: c.options.location ? 'follow' : 'manual' }
       if (c.options.jsonBody) {
         init.body = c.options.jsonBody
@@ -368,6 +384,12 @@ const cli = Cli.create('mppx', {
       if (c.options.verbose >= 2) printRequestHeaders(url, init, info)
       const challengeResponse = await targetFetch(fetchUrl, init)
       if (challengeResponse.status !== 402) {
+        if (c.options.session !== 'auto')
+          return c.error({
+            code: 'UNSUPPORTED_SESSION',
+            message: '--session requires a tempo/session payment challenge.',
+            exitCode: 2,
+          })
         if (c.options.fail && challengeResponse.status >= 400)
           return c.error({
             code: 'HTTP_ERROR',
@@ -379,7 +401,6 @@ const cli = Cli.create('mppx', {
         return
       }
 
-      const methodOpts = parseMethodOpts(c.options.methodOpt)
       const offeredChallenges = Challenge.fromResponseList(challengeResponse)
       const currencyChallenges = filterChallengesByCurrency(offeredChallenges, c.options.currency)
       if (c.options.currency && currencyChallenges.length === 0) {
@@ -446,7 +467,12 @@ const cli = Cli.create('mppx', {
       // Display challenge
       const shownKeys = new Set<string>()
       {
-        printResponseHeaders(challengeResponse, headerOpts)
+        printResponseHeaders(
+          challengeResponse,
+          challenge.method === 'tempo' && challenge.intent === 'session' && c.options.include
+            ? { ...headerOpts, include: false, verbose: Math.max(headerOpts.verbose, 2) }
+            : headerOpts,
+        )
 
         const challengeRows = (() => {
           const skip = new Set(['id', 'request'])
@@ -516,6 +542,44 @@ const cli = Cli.create('mppx', {
           }
         }
       }
+
+      const persistentSessionAccount =
+        process.env.MPPX_PRIVATE_KEY?.trim() ||
+        !isTempoAccount(resolveAccountName(c.options.account))
+      if (isTempoSessionChallenge(challenge) && persistentSessionAccount) {
+        try {
+          await runPersistentSessionRequest({
+            challenge,
+            challengeResponse: selectedChallengeResponse,
+            endpoint: url,
+            fetch: targetFetch,
+            fetchInput: fetchUrl,
+            init,
+            info,
+            methodOptions: methodOpts,
+            options: {
+              account: c.options.account,
+              fail: c.options.fail,
+              include: c.options.include,
+              network: c.options.network,
+              rpcUrl: c.options.rpcUrl,
+              session: c.options.session,
+              silent: c.options.silent,
+              verbose: c.options.verbose,
+            },
+            registry: sessionRegistry,
+          })
+        } catch (error) {
+          return sessionCommandError(error, 'SESSION_REQUEST_FAILED')
+        }
+        return
+      }
+      if (c.options.session !== 'auto')
+        return c.error({
+          code: 'UNSUPPORTED_SESSION',
+          message: '--session requires a tempo/session payment challenge.',
+          exitCode: 2,
+        })
 
       // Create credential
       let credential: string
@@ -1578,6 +1642,7 @@ cli.command(account)
 cli.command(discover)
 cli.command(init)
 cli.command(services)
+cli.command(sessions)
 cli.command(sign)
 cli.command(validate)
 
