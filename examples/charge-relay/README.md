@@ -44,10 +44,16 @@ local relay hooks with the Tempo server adapter:
 const method = tempo.charge({
   currency,
   recipient: account.address,
-  // relay: { apiBaseUrl: process.env.TEMPO_API_URL, apiKey: process.env.TEMPO_API_KEY! },
+  relay: { apiBaseUrl: process.env.TEMPO_API_URL, apiKey: process.env.TEMPO_API_KEY! },
+  supportedModes: ['pull'],
 })
 ```
 
-Uncommenting it lets MPPX issue and bind challenges while the adapter validates
-and broadcasts submitted credentials. Relay failures are returned as MPPX
-payment failures without exposing Tempo API details.
+Uncommenting it lets MPPX issue and bind challenges while the adapter delegates
+validation and finalization to the relay. The relay broadcasts pull credentials;
+for push credentials, it recognizes the already-broadcast transaction and
+returns its receipt without sending it again. Relay failures are returned as
+MPPX payment failures without exposing Tempo API details.
+
+The adapter derives broadcast ownership from the submitted credential, so a
+single relay-backed charge may safely advertise both `pull` and `push` modes.

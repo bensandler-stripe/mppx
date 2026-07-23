@@ -64,8 +64,10 @@ type BroadcastResponse =
  * Configures a Tempo payment method to use Tempo API's MPP relay.
  *
  * The adapter preserves the supplied method's challenge configuration while
- * delegating credential validation and terminal broadcast to
- * `/v1/mpp/validate` and `/v1/mpp/broadcast` respectively.
+ * delegating validation and finalization to `/v1/mpp/validate` and
+ * `/v1/mpp/broadcast`. The relay receives every submitted credential: it
+ * broadcasts pull transactions and finalizes push transaction hashes without
+ * sending them again.
  *
  * @internal
  */
@@ -127,13 +129,20 @@ export declare namespace configure {
     Method.Server<intent>,
     'broadcast' | 'validate'
   > & {
-    /** Broadcasts the credential through Tempo API. */
+    /** Delegates payment finalization to Tempo API's relay. */
     broadcast: Method.BroadcastFn<intent>
     /** Validates the credential through Tempo API. */
     validate: Method.ValidateFn<intent>
   }
 
-  /** Tempo API relay configuration for server-side Tempo charges. */
+  /**
+   * Tempo API relay configuration for server-side Tempo charges.
+   *
+   * The adapter sends every credential to the relay for finalization. The
+   * relay broadcasts pull credentials, while it recognizes a push credential
+   * as an already-broadcast transaction and returns its receipt without
+   * sending it again.
+   */
   type Options = {
     /** Tempo API key with the `mpp:write` scope. */
     apiKey: string

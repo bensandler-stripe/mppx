@@ -4,6 +4,8 @@ import * as Http from '~test/Http.js'
 
 import * as Challenge from '../../Challenge.js'
 import * as Credential from '../../Credential.js'
+import * as Method from '../../Method.js'
+import * as Receipt from '../../Receipt.js'
 import * as Mppx from '../../server/Mppx.js'
 import { tempo } from './Methods.js'
 
@@ -21,6 +23,11 @@ const credential = {
   },
   payload: { signature: '0x1234', type: 'transaction' },
   source: 'did:pkh:eip155:42431:0x123',
+} as const
+
+const pushedPayload = {
+  hash: '0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890',
+  type: 'hash',
 } as const
 
 type RelayHandler = (url: URL, init: RequestInit) => Response | Promise<Response>
@@ -52,7 +59,10 @@ function successReceipt() {
   })
 }
 
-async function createPaymentServer(fetch: typeof globalThis.fetch) {
+async function createPaymentServer(
+  fetch: typeof globalThis.fetch,
+  payload: typeof credential.payload | typeof pushedPayload = credential.payload,
+) {
   const [method] = methods(fetch, apiBaseUrl)
   const mppx = Mppx.create({ methods: [method], realm, secretKey })
   const handle = mppx.tempo.charge({ amount: '1', decimals: 6 })
@@ -65,7 +75,7 @@ async function createPaymentServer(fetch: typeof globalThis.fetch) {
   const challenge = Challenge.fromResponse(challengeResponse)
   const paymentCredential = Credential.from({
     challenge,
-    payload: credential.payload,
+    payload,
     source: credential.source,
   })
 
@@ -194,6 +204,65 @@ describe('relay boundary', () => {
         url: new URL(`${apiBaseUrl}/v1/mpp/broadcast`),
       },
     ])
+  })
+
+  test('delegates pushed transaction finalization to the relay', async () => {
+    const calls: Array<{ init: RequestInit; url: URL }> = []
+    const fetch = mockRelay((url, init) => {
+      calls.push({ init, url })
+      return url.pathname === '/v1/mpp/validate'
+        ? Response.json({ success: true })
+        : successReceipt()
+    })
+    const [method] = methods(fetch)
+    const pushedCredential = { ...credential, payload: pushedPayload }
+
+    await expect(
+      method.verify({
+        credential: pushedCredential,
+        request: credential.challenge.request,
+      } as never),
+    ).resolves.toMatchObject({
+      method: 'tempo',
+      reference: '0xabc',
+      status: 'success',
+    })
+    expect(calls).toEqual([
+      expect.objectContaining({ url: new URL(`${apiBaseUrl}/v1/mpp/validate`) }),
+      expect.objectContaining({
+        init: expect.objectContaining({ body: JSON.stringify(pushedCredential) }),
+        url: new URL(`${apiBaseUrl}/v1/mpp/broadcast`),
+      }),
+    ])
+  })
+
+  test('validates a pushed transaction before returning its receipt', async () => {
+    const calls: string[] = []
+    const fetch = mockRelay((url) => {
+      calls.push(url.pathname)
+      return url.pathname === '/v1/mpp/validate'
+        ? Response.json({ success: true })
+        : successReceipt()
+    })
+    const [method] = methods(fetch)
+    const pushedCredential = {
+      ...credential,
+      challenge: {
+        ...credential.challenge,
+        expires: new Date(Date.now() + 60_000).toISOString(),
+      },
+      payload: pushedPayload,
+    }
+
+    await expect(
+      Method.broadcastCredential([method], pushedCredential as never),
+    ).resolves.toMatchObject({
+      method: 'tempo',
+      reference: '0xabc',
+      status: 'success',
+    })
+
+    expect(calls).toEqual(['/v1/mpp/validate', '/v1/mpp/broadcast'])
   })
 
   test('uses the transaction hash as the transaction broadcast idempotency key', async () => {
@@ -427,6 +496,91 @@ describe('relay HTTP flow', () => {
       const response = await pay()
       expect(response.status).toBe(200)
       expect(response.headers.get('Payment-Receipt')).toBeTruthy()
+      expect(calls).toEqual(['/v1/mpp/validate', '/v1/mpp/broadcast'])
+    } finally {
+      server.close()
+    }
+  })
+
+  test('delegates pushed transaction finalization to the relay', async () => {
+    const calls: string[] = []
+    const fetch = mockRelay((url) => {
+      calls.push(url.pathname)
+      return url.pathname === '/v1/mpp/validate'
+        ? Response.json({ success: true })
+        : successReceipt()
+    })
+    const { pay, server } = await createPaymentServer(fetch, pushedPayload)
+
+    try {
+      const response = await pay()
+
+      expect(response.status).toBe(200)
+      expect(Receipt.fromResponse(response)).toMatchObject({
+        method: 'tempo',
+        reference: '0xabc',
+        status: 'success',
+      })
+      expect(calls).toEqual(['/v1/mpp/validate', '/v1/mpp/broadcast'])
+    } finally {
+      server.close()
+    }
+  })
+
+  test('does not issue a receipt when relay validation rejects a pushed transaction', async () => {
+    const calls: string[] = []
+    const fetch = mockRelay((url) => {
+      calls.push(url.pathname)
+      return Response.json({
+        error: { code: 'policy_denied', message: 'private detail' },
+        success: false,
+      })
+    })
+    const { pay, server } = await createPaymentServer(fetch, pushedPayload)
+
+    try {
+      const response = await pay()
+      const body = (await response.json()) as Record<string, unknown>
+
+      expect(response.status).toBe(402)
+      expect(response.headers.get('Payment-Receipt')).toBeNull()
+      expect(body).toMatchObject({
+        detail: 'Payment verification failed.',
+        type: 'https://paymentauth.org/problems/verification-failed',
+      })
+      expect(JSON.stringify(body)).not.toContain('policy_denied')
+      expect(JSON.stringify(body)).not.toContain('private detail')
+      expect(calls).toEqual(['/v1/mpp/validate'])
+    } finally {
+      server.close()
+    }
+  })
+
+  test('does not issue a receipt when relay finalization rejects a pushed transaction', async () => {
+    const calls: string[] = []
+    const fetch = mockRelay((url) => {
+      calls.push(url.pathname)
+      return url.pathname === '/v1/mpp/validate'
+        ? Response.json({ success: true })
+        : Response.json({
+            error: { code: 'already_used', message: 'private detail' },
+            success: false,
+          })
+    })
+    const { pay, server } = await createPaymentServer(fetch, pushedPayload)
+
+    try {
+      const response = await pay()
+      const body = (await response.json()) as Record<string, unknown>
+
+      expect(response.status).toBe(402)
+      expect(response.headers.get('Payment-Receipt')).toBeNull()
+      expect(body).toMatchObject({
+        detail: 'Payment verification failed.',
+        details: { code: 'already_used' },
+        type: 'https://paymentauth.org/problems/verification-failed',
+      })
+      expect(JSON.stringify(body)).not.toContain('private detail')
       expect(calls).toEqual(['/v1/mpp/validate', '/v1/mpp/broadcast'])
     } finally {
       server.close()

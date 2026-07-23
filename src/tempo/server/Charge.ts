@@ -785,7 +785,15 @@ export declare namespace charge {
      * By default, no prefix is applied.
      */
     storeKeyPrefix?: string | undefined
-    /** Delegates Tempo charge credential validation and broadcast to Tempo API or a compatible MPP relay. */
+    /**
+     * Delegates Tempo charge credential validation and broadcast to Tempo API
+     * or a compatible MPP relay.
+     *
+     * The adapter delegates finalization to the relay for both modes. The
+     * relay broadcasts pull credentials, while it recognizes a push
+     * credential as already broadcast and returns its receipt without sending
+     * it again.
+     */
     relay?: RelayOptions | undefined
     /**
      * Whether to wait for the charge transaction to confirm on-chain before
