@@ -636,14 +636,13 @@ export function assertTransactionPolicy(parameters: {
       maxFeePerGas: maxFeePerGasValue.toString(),
     })
 
-  const maxTotalFee = gasLimit * maxFeePerGasValue
+  const maxTotalFee = BigInt(gasLimit) * BigInt(maxFeePerGasValue)
   if (maxTotalFee > policy.maxTotalFee)
     fail('fee-sponsored transaction total fee budget exceeds sponsor policy', {
       gas: gasLimit.toString(),
       maxFeePerGas: maxFeePerGasValue.toString(),
       totalFee: maxTotalFee.toString(),
     })
-
   if (maxPriorityFeePerGas !== undefined && maxPriorityFeePerGas > maxFeePerGasValue)
     fail('fee-sponsored transaction maxPriorityFeePerGas exceeds maxFeePerGas', {
       maxFeePerGas: maxFeePerGasValue.toString(),
@@ -677,7 +676,12 @@ export function assertTransactionPolicy(parameters: {
       validBefore: String(validBeforeValue),
     })
 
-  return { gasLimit, maxFeePerGasValue, validBeforeValue }
+  return {
+    gasLimit,
+    maxFeePerGasValue,
+    totalFee: maxTotalFee,
+    validBeforeValue,
+  }
 }
 
 export function prepareSponsoredTransaction(parameters: {

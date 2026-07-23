@@ -38,6 +38,7 @@ import type * as types from '../internal/types.js'
 import * as Methods from '../Methods.js'
 import { html as htmlContent } from './internal/html.gen.js'
 import * as Relay from './Relay.js'
+import * as SponsorBudget from './SponsorBudget.js'
 
 /**
  * Creates a Tempo charge method intent for usage on the server.
@@ -72,10 +73,23 @@ export function charge<const parameters extends charge.Parameters>(
     waitForConfirmation = true,
   } = parameters
   const storeKeyPrefix = parameters.storeKeyPrefix ?? ''
-  const store = Store.from(
-    (parameters.store ?? Store.memory()) as Store.AtomicStore<charge.StoreItemMap>,
-    { keyPrefix: storeKeyPrefix },
-  )
+  const rawStore = (parameters.store ?? Store.memory()) as Store.AtomicStore<charge.StoreItemMap>
+  const store = Store.from(rawStore, { keyPrefix: storeKeyPrefix })
+  // Aggregate exposure belongs to the actual sponsor, not a caller-specific
+  // replay namespace. Sharing the raw store gives every tenant/process the same
+  // atomic sponsor-wide budget.
+  const sponsorBudgetStore = Store.from(rawStore) as Store.AtomicStore<{
+    [key: `mppx:charge:sponsor-budget:${string}`]: SponsorBudget.State
+  }>
+  const {
+    maxInFlightReservations = 100,
+    maxInFlightTotalFee = (feePayerPolicy?.maxTotalFee ?? 50_000_000_000_000_000n) * 10n,
+    ...transactionFeePayerPolicy
+  } = feePayerPolicy ?? {}
+  if (!Number.isSafeInteger(maxInFlightReservations) || maxInFlightReservations <= 0)
+    throw new Error('`feePayerPolicy.maxInFlightReservations` must be a positive safe integer.')
+  if (maxInFlightTotalFee <= 0n)
+    throw new Error('`feePayerPolicy.maxInFlightTotalFee` must be greater than zero.')
   const proofStore = parameters.store
     ? Store.from(parameters.store as Store.AtomicStore<charge.StoreItemMap>, {
         keyPrefix: storeKeyPrefix,
@@ -499,33 +513,16 @@ export function charge<const parameters extends charge.Parameters>(
             })
           }
 
-          let releaseReservation = true
-          let sponsoredSenderReservation: { chainId: number; sender: `0x${string}` } | undefined
+          let broadcastAttempted = false
+          let finalHash: `0x${string}` | undefined
+          let reservation: SponsorBudget.Handle | undefined
 
           try {
-            if (isFeePayerTx) {
-              const reservationChainId = chainId ?? client.chain!.id
-              if (
-                !(await markSponsoredSenderInFlight(store, {
-                  chainId: reservationChainId,
-                  sender: transaction.from as `0x${string}`,
-                }))
-              ) {
-                throw new VerificationFailedError({
-                  reason: 'Sponsored transaction from this sender is already in flight',
-                })
-              }
-              sponsoredSenderReservation = {
-                chainId: reservationChainId,
-                sender: transaction.from as `0x${string}`,
-              }
-            }
-
             const allowedFeeTokens = FeePayer.defaultAllowedFeeTokens(chainId)
             if (isFeePayerTx) FeePayer.assertAllowedFeeToken(transaction, allowedFeeTokens)
             const selectableFeeTokens = allowedFeeTokens as readonly `0x${string}`[]
 
-            const serializedTransaction_final = await (async () => {
+            const completedTransaction = await (async () => {
               if (feePayerAccount && methodDetails?.feePayer !== false) {
                 const completed = await FeePayer.preflightSponsorship({
                   transaction,
@@ -546,7 +543,7 @@ export function charge<const parameters extends charge.Parameters>(
                       challengeExpires: expires,
                       chainId: chainId ?? client.chain!.id,
                       details: { amount, currency, recipient },
-                      policy: feePayerPolicy,
+                      policy: transactionFeePayerPolicy,
                       transaction: {
                         ...transaction,
                         ...(feeToken ? { feeToken } : {}),
@@ -555,7 +552,13 @@ export function charge<const parameters extends charge.Parameters>(
                     return { feePayer: feePayerAccount.address, transaction: sponsored }
                   },
                 })
-                return signTransaction(client, completed.transaction as never)
+                return {
+                  serializedTransaction: await signTransaction(
+                    client,
+                    completed.transaction as never,
+                  ),
+                  sponsor: completed.feePayer,
+                }
               }
               if (feePayerUrl && isFeePayerTx) {
                 const completed = await FeePayer.preflightSponsorship({
@@ -567,17 +570,66 @@ export function charge<const parameters extends charge.Parameters>(
                       challengeExpires: expires,
                       chainId: chainId ?? client.chain!.id,
                       details: { amount, currency, recipient },
-                      policy: feePayerPolicy,
+                      policy: transactionFeePayerPolicy,
                       transaction,
                       url: feePayerUrl,
                     })
                     return { ...hosted, transaction }
                   },
                 })
-                return completed.serializedTransaction
+                return {
+                  serializedTransaction: completed.serializedTransaction,
+                  sponsor: completed.feePayer,
+                }
               }
-              return serializedTransaction
+              return { serializedTransaction, sponsor: undefined }
             })()
+            const serializedTransaction_final = completedTransaction.serializedTransaction
+            finalHash = keccak256(serializedTransaction_final)
+
+            if (
+              finalHash.toLowerCase() !== hash.toLowerCase() &&
+              !(await markHashUsed(store, finalHash))
+            )
+              throw new VerificationFailedError({
+                reason: 'Transaction hash has already been used',
+              })
+
+            if (isFeePayerTx) {
+              const sponsor = completedTransaction.sponsor
+              if (!sponsor)
+                throw new VerificationFailedError({
+                  reason: 'Sponsored transaction has no configured fee payer',
+                })
+              const reservationChainId = chainId ?? client.chain!.id
+              const { totalFee, validBeforeValue } = FeePayer.assertTransactionPolicy({
+                challengeExpires: expires,
+                chainId: reservationChainId,
+                details: { amount, currency, recipient },
+                policy: transactionFeePayerPolicy,
+                transaction,
+              })
+              const expiresAt = validBeforeValue * 1_000
+              const waitUntil = Math.min(
+                expiresAt,
+                expires ? Date.parse(expires) : Number.MAX_SAFE_INTEGER,
+              )
+              reservation = await SponsorBudget.reserve(sponsorBudgetStore, {
+                chainId: reservationChainId,
+                expiresAt,
+                fee: totalFee,
+                getReceipt: (transactionHash) =>
+                  getTransactionReceipt(client, { hash: transactionHash }),
+                id: finalHash.toLowerCase(),
+                maxReservations: maxInFlightReservations,
+                maxTotalFee: maxInFlightTotalFee,
+                owner: globalThis.crypto.randomUUID(),
+                sponsor,
+                transactionHash: finalHash,
+                waitUntil,
+              })
+              Expires.assert(challenge.expires, challenge.id)
+            }
 
             // Pre-broadcast simulation for non-sponsored transactions.
             if (!isFeePayerTx)
@@ -586,10 +638,20 @@ export function charge<const parameters extends charge.Parameters>(
                 FeePayer.simulationTransaction(transaction, { feePayer: false }) as never,
               )
 
+            if (
+              reservation &&
+              !(await SponsorBudget.transition(sponsorBudgetStore, reservation, 'broadcasting'))
+            )
+              throw new VerificationFailedError({
+                reason: 'Sponsor budget reservation ownership was lost before broadcast',
+              })
+
+            broadcastAttempted = true
             if (waitForConfirmation) {
               const receipt = await sendRawTransactionSync(client, {
                 serializedTransaction: serializedTransaction_final,
               })
+              if (reservation) await SponsorBudget.release(sponsorBudgetStore, reservation)
               const matchedLogs = await assertTransferLogs(receipt, {
                 currency,
                 sender: transaction.from! as `0x${string}`,
@@ -600,19 +662,10 @@ export function charge<const parameters extends charge.Parameters>(
                   challengeId: challenge.id,
                   realm: challenge.realm,
                 })
-              // Post-broadcast dedup: catch malleable input variants
-              // (different serialized bytes, same underlying tx) that
-              // bypass the pre-broadcast check. Skip if the broadcast
-              // hash matches the input hash (already stored above).
-              if (
-                receipt.transactionHash.toLowerCase() !== hash.toLowerCase() &&
-                !(await markHashUsed(store, receipt.transactionHash))
-              ) {
+              if (receipt.transactionHash.toLowerCase() !== finalHash.toLowerCase())
                 throw new VerificationFailedError({
-                  reason: 'Transaction hash has already been used',
+                  reason: 'Broadcast transaction hash does not match the signed transaction',
                 })
-              }
-              releaseReservation = false
               return toReceipt(receipt)
             }
 
@@ -622,16 +675,17 @@ export function charge<const parameters extends charge.Parameters>(
             const reference = await sendRawTransaction(client, {
               serializedTransaction: serializedTransaction_final,
             })
-            // Post-broadcast dedup: same
-            if (
-              reference.toLowerCase() !== hash.toLowerCase() &&
-              !(await markHashUsed(store, reference))
-            ) {
+            if (reference.toLowerCase() !== finalHash.toLowerCase())
               throw new VerificationFailedError({
-                reason: 'Transaction hash has already been used',
+                reason: 'Broadcast transaction hash does not match the signed transaction',
               })
-            }
-            releaseReservation = false
+            if (
+              reservation &&
+              !(await SponsorBudget.transition(sponsorBudgetStore, reservation, 'pending'))
+            )
+              throw new VerificationFailedError({
+                reason: 'Sponsor budget reservation ownership was lost after broadcast',
+              })
             return {
               method: 'tempo',
               status: 'success',
@@ -639,11 +693,13 @@ export function charge<const parameters extends charge.Parameters>(
               reference,
             } as const
           } catch (error) {
-            if (releaseReservation) await releaseHashUse(store, hash)
+            if (!broadcastAttempted) {
+              if (reservation) await SponsorBudget.release(sponsorBudgetStore, reservation)
+              if (finalHash && finalHash.toLowerCase() !== hash.toLowerCase())
+                await releaseHashUse(store, finalHash)
+              await releaseHashUse(store, hash)
+            }
             throw error
-          } finally {
-            if (sponsoredSenderReservation)
-              await releaseSponsoredSenderInFlight(store, sponsoredSenderReservation)
           }
         }
       }
@@ -653,7 +709,9 @@ export function charge<const parameters extends charge.Parameters>(
 }
 
 export declare namespace charge {
-  type StoreItemMap = { [key: `mppx:charge:${string}`]: number }
+  type StoreItemMap = {
+    [key: `mppx:charge:${string}`]: number | SponsorBudget.State
+  }
 
   type Defaults = LooseOmit<Method.RequestDefaults<typeof Methods.charge>, 'feePayer' | 'recipient'>
 
@@ -681,10 +739,13 @@ export declare namespace charge {
     /**
      * Override the fee-sponsor policy used when co-signing Tempo charge
      * transactions. Defaults resolve per chain, including a higher
-     * priority-fee ceiling on Moderato.
+     * priority-fee ceiling on Moderato and a bounded aggregate in-flight fee
+     * budget. Sponsored transactions reserve their declared maximum fee
+     * atomically; independent expiring-nonce transactions run concurrently
+     * while capacity remains and wait for capacity when the budget is full.
      *
-     * If you increase `maxGas` or `maxFeePerGas`, you may also need to raise
-     * `maxTotalFee` so the combined fee budget remains valid.
+     * If you increase `maxGas`, `maxFeePerGas`, or `maxTotalFee`, you may also
+     * need to raise `maxInFlightTotalFee`.
      */
     feePayerPolicy?: FeePayerPolicy | undefined
     /**
@@ -751,7 +812,16 @@ export declare namespace charge {
     }
   >
 
-  type FeePayerPolicy = Partial<FeePayer.Policy>
+  type FeePayerPolicy = Partial<FeePayer.Policy> & {
+    /** Maximum number of sponsored transactions awaiting a terminal receipt. @default 100 */
+    maxInFlightReservations?: number | undefined
+    /**
+     * Maximum aggregate declared fee exposure awaiting terminal receipts.
+     *
+     * @default `maxTotalFee * 10`
+     */
+    maxInFlightTotalFee?: bigint | undefined
+  }
 
   /** Tempo API relay configuration for server-side charges. */
   type RelayOptions = Relay.configure.Options
@@ -1095,14 +1165,6 @@ function getProofStoreKey(challengeId: string): `mppx:charge:${string}` {
   return `mppx:charge:proof:${challengeId}`
 }
 
-/** @internal */
-function getSponsoredSenderStoreKey(parameters: {
-  chainId: number
-  sender: `0x${string}`
-}): `mppx:charge:${string}` {
-  return `mppx:charge:sponsor:${parameters.chainId}:${parameters.sender.toLowerCase()}`
-}
-
 async function markHashUsed(
   store: Store.AtomicStore<charge.StoreItemMap>,
   hash: `0x${string}`,
@@ -1134,25 +1196,6 @@ function parseHashCredentialSource(parameters: {
   }
 
   return parsed
-}
-
-/** @internal */
-async function markSponsoredSenderInFlight(
-  store: Store.AtomicStore<charge.StoreItemMap>,
-  parameters: { chainId: number; sender: `0x${string}` },
-): Promise<boolean> {
-  return store.update(getSponsoredSenderStoreKey(parameters), (current) => {
-    if (current !== null) return { op: 'noop', result: false }
-    return { op: 'set', value: Date.now(), result: true }
-  })
-}
-
-/** @internal */
-async function releaseSponsoredSenderInFlight(
-  store: Store.AtomicStore<charge.StoreItemMap>,
-  parameters: { chainId: number; sender: `0x${string}` },
-): Promise<void> {
-  await store.delete(getSponsoredSenderStoreKey(parameters))
 }
 
 /** @internal */
