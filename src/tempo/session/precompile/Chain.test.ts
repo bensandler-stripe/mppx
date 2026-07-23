@@ -12,7 +12,7 @@ import {
   type Hex,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { Transaction } from 'viem/tempo'
+import { Abis, Addresses, Transaction } from 'viem/tempo'
 import { describe, expect, test } from 'vp/test'
 
 import { VerificationFailedError } from '../../../Errors.js'
@@ -36,6 +36,7 @@ const descriptor = {
 const deposit = Types.uint96(1_000_000n)
 const chainId = 42431
 const txHash = `0x${'ab'.repeat(32)}` as const
+const sourceToken = '0x6666666666666666666666666666666666666666' as const
 const feePayer = privateKeyToAccount(
   '0x59c6995e998f97a5a0044966f0945389d1fc6e60e7346d6c36c49d32f75b9a1b',
 )
@@ -162,7 +163,11 @@ function topUpLog(parameters: { channelId: `0x${string}`; newDeposit: bigint }) 
 }
 
 async function createSerializedTransaction(parameters: {
-  calls: { to: `0x${string}`; data?: `0x${string}` | undefined }[]
+  calls: {
+    to?: `0x${string}` | undefined
+    data?: `0x${string}` | undefined
+    value?: bigint | undefined
+  }[]
   gas?: bigint | undefined
   signed?: boolean | undefined
 }) {
@@ -192,6 +197,28 @@ async function createSerializedTransaction(parameters: {
   } as never)) as `0x${string}`
 }
 
+function autoSwapCalls(amountOut: bigint = deposit) {
+  const maxAmountIn = amountOut + 1_000n
+  return [
+    {
+      to: sourceToken,
+      data: encodeFunctionData({
+        abi: Abis.tip20,
+        functionName: 'approve',
+        args: [Addresses.stablecoinDex, maxAmountIn],
+      }),
+    },
+    {
+      to: Addresses.stablecoinDex,
+      data: encodeFunctionData({
+        abi: Abis.stablecoinDex,
+        functionName: 'swapExactAmountOut',
+        args: [sourceToken, descriptor.token, amountOut, maxAmountIn],
+      }),
+    },
+  ] as const
+}
+
 async function createOpenTransaction(
   parameters: {
     authorizedSigner?: `0x${string}` | undefined
@@ -201,6 +228,13 @@ async function createOpenTransaction(
     signed?: boolean | undefined
     token?: `0x${string}` | undefined
     to?: `0x${string}` | undefined
+    prefixCalls?:
+      | readonly {
+          to?: `0x${string}` | undefined
+          data?: `0x${string}` | undefined
+          value?: bigint | undefined
+        }[]
+      | undefined
   } = {},
 ) {
   const data = encodeFunctionData({
@@ -216,7 +250,7 @@ async function createOpenTransaction(
     ],
   })
   return createSerializedTransaction({
-    calls: [{ to: parameters.to ?? tip20ChannelEscrow, data }],
+    calls: [...(parameters.prefixCalls ?? []), { to: parameters.to ?? tip20ChannelEscrow, data }],
     gas: parameters.gas,
     signed: parameters.signed,
   })
@@ -229,6 +263,13 @@ async function createTopUpTransaction(
     gas?: bigint | undefined
     signed?: boolean | undefined
     to?: `0x${string}` | undefined
+    prefixCalls?:
+      | readonly {
+          to?: `0x${string}` | undefined
+          data?: `0x${string}` | undefined
+          value?: bigint | undefined
+        }[]
+      | undefined
   } = {},
 ) {
   const data = encodeFunctionData({
@@ -240,7 +281,7 @@ async function createTopUpTransaction(
     ],
   })
   return createSerializedTransaction({
-    calls: [{ to: parameters.to ?? tip20ChannelEscrow, data }],
+    calls: [...(parameters.prefixCalls ?? []), { to: parameters.to ?? tip20ChannelEscrow, data }],
     gas: parameters.gas,
     signed: parameters.signed,
   })
@@ -446,8 +487,152 @@ describe('precompile broadcastOpenTransaction', () => {
         expectedPayer: descriptor.payer,
         serializedTransaction,
       }),
-    ).rejects.toThrow('TIP-1034 open transaction must contain exactly one call')
+    ).rejects.toThrow(
+      'TIP-1034 open transaction must contain one management call, optionally preceded by an auto-swap',
+    )
   })
+
+  const [validApprove, validSwap] = autoSwapCalls()
+  const wrongToken = '0x7777777777777777777777777777777777777777' as const
+  const maxAmountIn = deposit + 1_000n
+  const approve = (parameters: {
+    amount?: bigint | undefined
+    spender?: Address | undefined
+    token?: Address | undefined
+  }) => ({
+    to: parameters.token ?? sourceToken,
+    data: encodeFunctionData({
+      abi: Abis.tip20,
+      functionName: 'approve',
+      args: [parameters.spender ?? Addresses.stablecoinDex, parameters.amount ?? maxAmountIn],
+    }),
+  })
+  const swap = (parameters: {
+    amountOut?: bigint | undefined
+    maxAmount?: bigint | undefined
+    tokenIn?: Address | undefined
+    tokenOut?: Address | undefined
+  }) => ({
+    to: Addresses.stablecoinDex as Address,
+    data: encodeFunctionData({
+      abi: Abis.stablecoinDex,
+      functionName: 'swapExactAmountOut',
+      args: [
+        parameters.tokenIn ?? sourceToken,
+        parameters.tokenOut ?? descriptor.token,
+        parameters.amountOut ?? deposit,
+        parameters.maxAmount ?? maxAmountIn,
+      ],
+    }),
+  })
+  const invalidAutoSwapPrefixes = [
+    {
+      name: 'missing call target',
+      prefixCalls: [{ data: validApprove.data }, validSwap],
+      reason: 'call is missing a target or calldata',
+    },
+    {
+      name: 'native value',
+      prefixCalls: [{ ...validApprove, value: 1n }, validSwap],
+      reason: 'calls must not transfer native value',
+    },
+    {
+      name: 'wrong DEX target',
+      prefixCalls: [validApprove, { ...validSwap, to: wrongToken }],
+      reason: 'targets the wrong DEX',
+    },
+    {
+      name: 'invalid approval calldata',
+      prefixCalls: [{ ...validApprove, data: '0x12345678' as const }, validSwap],
+      reason: 'approval calldata is invalid',
+    },
+    {
+      name: 'invalid swap calldata',
+      prefixCalls: [validApprove, { ...validSwap, data: '0x12345678' as const }],
+      reason: 'swap calldata is invalid',
+    },
+    {
+      name: 'wrong approval function',
+      prefixCalls: [
+        {
+          to: sourceToken,
+          data: encodeFunctionData({
+            abi: Abis.tip20,
+            functionName: 'transfer',
+            args: [Addresses.stablecoinDex, maxAmountIn],
+          }),
+        },
+        validSwap,
+      ],
+      reason: 'must contain approve followed by swapExactAmountOut',
+    },
+    {
+      name: 'approval token mismatch',
+      prefixCalls: [approve({ token: wrongToken }), validSwap],
+      reason: 'approval token does not match swap input',
+    },
+    {
+      name: 'approval spender mismatch',
+      prefixCalls: [approve({ spender: wrongToken }), validSwap],
+      reason: 'approval spender is not the DEX',
+    },
+    {
+      name: 'approval amount mismatch',
+      prefixCalls: [approve({ amount: maxAmountIn + 1n }), validSwap],
+      reason: 'approval amount does not match swap maximum input',
+    },
+    {
+      name: 'output token mismatch',
+      prefixCalls: [validApprove, swap({ tokenOut: wrongToken })],
+      reason: 'output token does not match channel currency',
+    },
+    {
+      name: 'output amount mismatch',
+      prefixCalls: [
+        approve({ amount: maxAmountIn + 1n }),
+        swap({ amountOut: deposit + 1n, maxAmount: maxAmountIn + 1n }),
+      ],
+      reason: 'output amount does not match channel deposit',
+    },
+    {
+      name: 'identical input and output tokens',
+      prefixCalls: [approve({ token: descriptor.token }), swap({ tokenIn: descriptor.token })],
+      reason: 'input and output tokens must differ',
+    },
+    {
+      name: 'non-canonical approval calldata',
+      prefixCalls: [{ ...validApprove, data: `${validApprove.data}00` as Hex }, validSwap],
+      reason: 'approval calldata is not canonical',
+    },
+    {
+      name: 'non-canonical swap calldata',
+      prefixCalls: [validApprove, { ...validSwap, data: `${validSwap.data}00` as Hex }],
+      reason: 'swap calldata is not canonical',
+    },
+  ] as const
+
+  test.each(invalidAutoSwapPrefixes)(
+    'rejects an auto-swap with $name',
+    async ({ prefixCalls, reason }) => {
+      const serializedTransaction = await createOpenTransaction({ prefixCalls })
+
+      await expect(
+        Chain.broadcastOpenTransaction({
+          chainId,
+          client: createMockClient(),
+          escrowContract: tip20ChannelEscrow,
+          expectedAuthorizedSigner: descriptor.authorizedSigner,
+          expectedChannelId: `0x${'11'.repeat(32)}`,
+          expectedCurrency: descriptor.token,
+          expectedExpiringNonceHash: expectedExpiringNonceHash(serializedTransaction),
+          expectedOperator: descriptor.operator,
+          expectedPayee: descriptor.payee,
+          expectedPayer: descriptor.payer,
+          serializedTransaction,
+        }),
+      ).rejects.toThrow(`TIP-1034 open auto-swap ${reason}`)
+    },
+  )
 
   test('rejects open transactions targeting the wrong escrow contract', async () => {
     const serializedTransaction = await createOpenTransaction({ to: descriptor.token })
@@ -715,8 +900,8 @@ describe('precompile broadcastOpenTransaction', () => {
     ).rejects.toThrow('credential expiringNonceHash does not match transaction')
   })
 
-  test('returns tx hash, descriptor, event fields, and read-back state on success', async () => {
-    const serializedTransaction = await createOpenTransaction()
+  test('accepts an exact-output auto-swap before open', async () => {
+    const serializedTransaction = await createOpenTransaction({ prefixCalls: autoSwapCalls() })
     const expiringNonceHash = expectedExpiringNonceHash(serializedTransaction)
     const expectedDescriptor = { ...descriptor, expiringNonceHash }
     const channelId = Channel.computeId({
@@ -858,7 +1043,9 @@ describe('precompile broadcastTopUpTransaction', () => {
         expectedCurrency: descriptor.token,
         serializedTransaction,
       }),
-    ).rejects.toThrow('TIP-1034 topUp transaction must contain exactly one call')
+    ).rejects.toThrow(
+      'TIP-1034 topUp transaction must contain one management call, optionally preceded by an auto-swap',
+    )
   })
 
   test('rejects top-up transactions targeting the wrong escrow contract', async () => {
@@ -1025,8 +1212,8 @@ describe('precompile broadcastTopUpTransaction', () => {
     ).rejects.toThrow('topUp deposit does not match credential')
   })
 
-  test('returns tx hash, new deposit, and read-back state on success', async () => {
-    const serializedTransaction = await createTopUpTransaction()
+  test('accepts an exact-output auto-swap before top-up', async () => {
+    const serializedTransaction = await createTopUpTransaction({ prefixCalls: autoSwapCalls() })
     const channelId = Channel.computeId({ ...descriptor, chainId, escrow: tip20ChannelEscrow })
     const newDeposit = deposit * 2n
     const state = { settled: 0n, deposit: newDeposit, closeRequestedAt: 0 }
