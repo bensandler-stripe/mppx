@@ -18,6 +18,8 @@ const method = tempo.charge({
   account,
   currency,
   recipient: account.address,
+  // To replace the local `relay` implementation below with the built-in adapter:
+  // relay: { apiBaseUrl: apiUrl, apiKey },
   supportedModes: ['pull'],
   testnet: true,
 })
@@ -27,7 +29,7 @@ const payments = Mppx.create({
       ...method,
       async validate(parameters: Parameters<NonNullable<typeof method.validate>>[0]) {
         const { credential, request } = parameters
-        await relay('/v1/mpp/verify', credential)
+        await relay('/v1/mpp/validate', credential)
         return {
           challenge: credential.challenge,
           credential,
@@ -59,7 +61,7 @@ app.get('/api/photo', payments.charge({ amount: '0.01', description: 'Random sto
 serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 5173) })
 
 async function relay(
-  path: '/v1/mpp/broadcast' | '/v1/mpp/verify',
+  path: '/v1/mpp/broadcast' | '/v1/mpp/validate',
   credential: { challenge: Record<string, unknown>; payload: unknown },
   headers: Record<string, string> = {},
 ) {
