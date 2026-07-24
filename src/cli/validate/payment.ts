@@ -46,6 +46,20 @@ async function provisionAndPayTestnet(
     await Promise.all(hashes.map((hash) => waitForTransactionReceipt(client, { hash })))
     if (!silent) console.log(pc.dim(`    Using wallet: ${account.address}`))
 
+    // The faucet tx receipt can land before the RPC's balance reads are
+    // consistent with it, so poll briefly for the funded balance to appear
+    // rather than racing straight into the charge.
+    const currency = (challenge.request as Record<string, unknown>).currency
+    if (typeof currency === 'string') {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const balance = await Actions.token
+          .getBalance(client, { account: account.address, token: currency as Address })
+          .catch(() => undefined)
+        if (balance && balance.amount > 0n) break
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+    }
+
     const methods = [...tempoMethods({ account })]
     return { methods }
   } catch (error) {
@@ -198,7 +212,7 @@ export async function validatePaymentFlow(
         const mppx = Mppx.create({ methods: provisioned.methods, polyfill: false })
         const cred = await mppx.createCredential(fakeResp)
         results.push(check('Payment: submitted', 'ephemeral testnet wallet'))
-        return await sendAndValidateResponse(
+        await sendAndValidateResponse(
           results,
           url,
           endpoint,
@@ -210,17 +224,17 @@ export async function validatePaymentFlow(
         )
       } catch (error) {
         results.push(fail('Payment: create credential', (error as Error).message))
-        return results
       }
     } else {
       results.push(
         fail('Payment: auto-provision wallet', 'Failed to create and fund testnet wallet'),
       )
-      return results
     }
+    options.onResults?.(results)
   }
 
-  // Try each challenge method (skip testnet challenge already handled above)
+  // Try each remaining challenge method (tempo testnet already handled above),
+  // so validate exercises every payment method the server offers, same as mainnet.
   const loaded = await loadConfig().catch(() => undefined)
   const isInteractive = options.interactive
   const stripeKey = process.env.MPPX_STRIPE_SECRET_KEY ?? resolveStripeKey(verbose)

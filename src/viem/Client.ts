@@ -1,7 +1,13 @@
 import { type Chain, type Client, createClient, createTransport, custom, http } from 'viem'
 import { withFeePayer } from 'viem/tempo'
+import { tempo as tempoMainnetChain, tempoModerato } from 'viem/tempo/chains'
 
 import type { MaybePromise } from '../internal/types.js'
+
+const knownTempoChains: Record<number, Chain> = {
+  [tempoMainnetChain.id]: tempoMainnetChain,
+  [tempoModerato.id]: tempoModerato,
+}
 
 export function getResolver(
   parameters: getResolver.Parameters & {
@@ -73,7 +79,7 @@ export function getResolver(
     if (!url) throw new Error(`No \`rpcUrl\` configured for \`chainId\` (${resolvedChainId}).`)
     const transport = feePayerUrl ? withFeePayer(http(url), http(feePayerUrl)) : http(url)
     return createClient({
-      chain: { ...chain, id: resolvedChainId } as never,
+      chain: (knownTempoChains[resolvedChainId] ?? { ...chain, id: resolvedChainId }) as never,
       transport,
     })
   }

@@ -2,7 +2,7 @@ import { createClient, custom, defineChain, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { signTransaction } from 'viem/actions'
 import { Account as TempoAccount, Transaction } from 'viem/tempo'
-import { tempoLocalnet } from 'viem/tempo/chains'
+import { tempo as tempoMainnetChain, tempoLocalnet, tempoModerato } from 'viem/tempo/chains'
 import { afterEach, describe, expect, test, vi } from 'vp/test'
 
 import * as Client from './Client.js'
@@ -46,6 +46,23 @@ describe('getResolver', () => {
 
     expect(client.chain?.id).toBe(99)
     expect(client.chain?.name).toBe('test')
+  })
+
+  test('behavior: resolves the correct named Tempo chain even when the default chain differs', async () => {
+    const getClient = Client.getResolver({
+      // Default chain is mainnet, but the resolved chain ID below is testnet.
+      chain: tempoMainnetChain as never,
+      rpcUrl: {
+        [tempoMainnetChain.id]: 'https://rpc.example.com',
+        [tempoModerato.id]: 'https://rpc2.example.com',
+      },
+    })
+
+    const client = await getClient({ chainId: tempoModerato.id })
+
+    expect(client.chain?.id).toBe(tempoModerato.id)
+    expect(client.chain?.name).toBe(tempoModerato.name)
+    expect(client.chain?.name).not.toBe(tempoMainnetChain.name)
   })
 
   test('error: throws when no rpcUrl provided', () => {

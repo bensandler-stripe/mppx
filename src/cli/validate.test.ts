@@ -707,6 +707,22 @@ describe('validate: multi-challenge', () => {
     const { output } = await serve(['validate', server.url])
     expect(output).toContain('Amount is valid integer string (Got: 1.50)')
   })
+
+  test("tempo doesn't block other testnet methods", { timeout: 15_000 }, async () => {
+    // makeChallenge() defaults to a tempo testnet challenge (chainId 42431),
+    // which takes the ephemeral-wallet fast path. That path used to return
+    // immediately, so a server offering evm/stripe alongside tempo would
+    // never have those methods exercised. It should now fall through and
+    // try them too, same as it does for tempo mainnet challenges.
+    const server = await multiChallengeServer([makeChallenge(), makeEvmChallenge()])
+    const { output } = await serve(['validate', server.url, '--outputJson', '--yes'])
+    const jsonStart = output.indexOf('{')
+    const jsonEnd = output.lastIndexOf('}')
+    const result = JSON.parse(output.slice(jsonStart, jsonEnd + 1))
+    const paymentLabels = result.endpoints[0].payment.map((r: { label: string }) => r.label)
+    expect(paymentLabels).toContain('Payment: submitted')
+    expect(paymentLabels.some((l: string) => l.includes('[evm]'))).toBe(true)
+  })
 })
 
 describe('validate: payment methods coverage', () => {
