@@ -42,86 +42,71 @@ import { recordCryptoPayment } from './internal/record-payment.js';
  */
 export async function stripe(parameters) {
     const { secretKey, profileId, paymentMethodTypes } = parameters;
-    const methods = [];
-    // Crypto methods: tempo is always on, additional networks are merged
-    const cryptoMethods = await stripe.crypto({ secretKey, additional: parameters.additional });
-    methods.push(...cryptoMethods);
-    // SPT method: always on
-    methods.push(stripe.spt({
+    const isTestMode = secretKey.includes('_test_');
+    // Resolve tempo deposit address (required)
+    const tempoAddress = await resolveDepositAddress(secretKey, 'tempo');
+    if (!tempoAddress) {
+        throw new Error('stripe(): failed to resolve Tempo deposit address. Ensure your Stripe account has crypto enabled.');
+    }
+    // Create tempo method (always on)
+    const tempoMethod = wrapWithPaymentRecording(tempoCharge({
+        currency: (isTestMode
+            ? tempoDefaults.tokens.pathUsd
+            : tempoDefaults.tokens.usdc),
+        recipient: tempoAddress,
+        ...(isTestMode && { testnet: true }),
+    }), secretKey);
+    // Create SPT method (always on)
+    const sptMethod = stripe.spt({
         secretKey,
         networkId: profileId,
         paymentMethodTypes: paymentMethodTypes ?? ['card', 'link'],
-    }));
-    return methods;
+    });
+    // Resolve additional networks (best-effort)
+    const additional = await resolveAdditionalNetworks(secretKey, isTestMode, parameters.additional);
+    return [tempoMethod, sptMethod, ...additional];
 }
 (function (stripe) {
-    /**
-     * Creates crypto payment methods. Tempo is always included.
-     * Additional entries are merged, with duplicates resolved by preferring the additional entry.
-     */
-    async function crypto(parameters) {
-        const { secretKey, additional = [] } = parameters;
-        const isTestMode = secretKey.includes('_test_');
-        // Built-in defaults
-        const defaults = [{ network: 'tempo' }];
-        // Merge: additional entries override defaults with the same network name
-        const networkMap = new Map();
-        for (const entry of defaults) {
-            networkMap.set(entry.network, entry);
-        }
-        for (const entry of additional) {
-            networkMap.set(entry.network, entry);
-        }
-        // Resolve all deposit addresses in parallel
-        const entries = [...networkMap.values()];
-        const resolved = await Promise.all(entries.map(async (entry) => ({
-            entry,
-            address: await resolveDepositAddress(secretKey, entry.network),
-        })));
-        const methods = [];
-        for (const { entry, address } of resolved) {
-            if (!address)
-                continue;
-            let methodOrMethods;
-            if ('configure' in entry) {
-                methodOrMethods = entry.configure(address);
-            }
-            else if (entry.network === 'tempo') {
-                const { network: _, ...config } = entry;
-                methodOrMethods = tempoCharge({
-                    currency: (isTestMode
-                        ? tempoDefaults.tokens.pathUsd
-                        : tempoDefaults.tokens.usdc),
-                    recipient: address,
-                    ...(isTestMode && { testnet: true }),
-                    ...config,
-                });
-            }
-            else if (entry.network === 'base') {
-                const { network: _, ...config } = entry;
-                methodOrMethods = evmCharge({
-                    currency: isTestMode ? EvmAssets.baseSepolia.USDC : EvmAssets.base.USDC,
-                    recipient: address,
-                    ...config,
-                });
-            }
-            else {
-                continue;
-            }
-            // Wrap with Stripe payment recording
-            const wrapped = Array.isArray(methodOrMethods)
-                ? methodOrMethods.map((m) => wrapWithPaymentRecording(m, secretKey))
-                : [wrapWithPaymentRecording(methodOrMethods, secretKey)];
-            methods.push(...wrapped);
-        }
-        return methods;
-    }
-    stripe.crypto = crypto;
     /** Creates a Stripe SPT charge method for card/link payments. */
     stripe.spt = charge_;
     /** @deprecated Use `stripe.spt()` instead. */
     stripe.charge = charge_;
 })(stripe || (stripe = {}));
+async function resolveAdditionalNetworks(secretKey, isTestMode, additional) {
+    if (!additional || additional.length === 0)
+        return [];
+    const methods = [];
+    const resolved = await Promise.all(additional
+        .filter((entry) => entry.network !== 'tempo')
+        .map(async (entry) => ({
+        entry,
+        address: await resolveDepositAddress(secretKey, entry.network),
+    })));
+    for (const { entry, address } of resolved) {
+        if (!address)
+            continue;
+        let methodOrMethods;
+        if ('configure' in entry) {
+            methodOrMethods = entry.configure(address);
+        }
+        else if (entry.network === 'base') {
+            const { network: _, ...config } = entry;
+            methodOrMethods = evmCharge({
+                currency: isTestMode ? EvmAssets.baseSepolia.USDC : EvmAssets.base.USDC,
+                recipient: address,
+                ...config,
+            });
+        }
+        else {
+            continue;
+        }
+        const wrapped = Array.isArray(methodOrMethods)
+            ? methodOrMethods.map((m) => wrapWithPaymentRecording(m, secretKey))
+            : [wrapWithPaymentRecording(methodOrMethods, secretKey)];
+        methods.push(...wrapped);
+    }
+    return methods;
+}
 /**
  * Wraps a method's verify function to record successful crypto payments
  * as Stripe PaymentIntents via transaction_verification.

@@ -4,6 +4,8 @@ import * as tempoDefaults from '../../tempo/internal/defaults.js'
 import { charge as tempoCharge } from '../../tempo/server/Charge.js'
 import { charge as evmCharge } from '../../evm/server/Charge.js'
 import * as EvmAssets from '../../evm/Assets.js'
+import * as TempoMethods from '../../tempo/Methods.js'
+import * as StripeMethods from '../Methods.js'
 import { charge as charge_ } from './Charge.js'
 import { resolveDepositAddress } from './internal/deposit-address.js'
 import { recordCryptoPayment } from './internal/record-payment.js'
@@ -22,6 +24,9 @@ type CustomNetworkEntry = {
 }
 
 type AdditionalNetworkEntry = TempoNetworkEntry | BaseNetworkEntry | CustomNetworkEntry
+
+type TempoChargeServer = Method.AnyServer & { name: 'tempo'; intent: 'charge' }
+type StripeSptServer = Method.AnyServer & { name: 'stripe'; intent: 'charge' }
 
 /**
  * Creates all Stripe-supported MPP payment methods from a single configuration.
@@ -60,25 +65,45 @@ type AdditionalNetworkEntry = TempoNetworkEntry | BaseNetworkEntry | CustomNetwo
  */
 export async function stripe<const parameters extends stripe.Parameters>(
   parameters: parameters,
-): Promise<readonly Method.AnyServer[]> {
+): Promise<readonly [TempoChargeServer, StripeSptServer, ...Method.AnyServer[]]> {
   const { secretKey, profileId, paymentMethodTypes } = parameters
+  const isTestMode = secretKey.includes('_test_')
 
-  const methods: Method.AnyServer[] = []
+  // Resolve tempo deposit address (required)
+  const tempoAddress = await resolveDepositAddress(secretKey, 'tempo')
+  if (!tempoAddress) {
+    throw new Error(
+      'stripe(): failed to resolve Tempo deposit address. Ensure your Stripe account has crypto enabled.',
+    )
+  }
 
-  // Crypto methods: tempo is always on, additional networks are merged
-  const cryptoMethods = await stripe.crypto({ secretKey, additional: parameters.additional })
-  methods.push(...cryptoMethods)
-
-  // SPT method: always on
-  methods.push(
-    stripe.spt({
-      secretKey,
-      networkId: profileId,
-      paymentMethodTypes: paymentMethodTypes ?? ['card', 'link'],
+  // Create tempo method (always on)
+  const tempoMethod = wrapWithPaymentRecording(
+    tempoCharge({
+      currency: (isTestMode
+        ? tempoDefaults.tokens.pathUsd
+        : tempoDefaults.tokens.usdc) as `0x${string}`,
+      recipient: tempoAddress as `0x${string}`,
+      ...(isTestMode && { testnet: true }),
     }),
+    secretKey,
   )
 
-  return methods
+  // Create SPT method (always on)
+  const sptMethod = stripe.spt({
+    secretKey,
+    networkId: profileId,
+    paymentMethodTypes: paymentMethodTypes ?? ['card', 'link'],
+  })
+
+  // Resolve additional networks (best-effort)
+  const additional = await resolveAdditionalNetworks(secretKey, isTestMode, parameters.additional)
+
+  return [tempoMethod, sptMethod, ...additional] as readonly [
+    TempoChargeServer,
+    StripeSptServer,
+    ...Method.AnyServer[],
+  ]
 }
 
 export declare namespace stripe {
@@ -98,86 +123,59 @@ export declare namespace stripe {
 }
 
 export namespace stripe {
-  /**
-   * Creates crypto payment methods. Tempo is always included.
-   * Additional entries are merged, with duplicates resolved by preferring the additional entry.
-   */
-  export async function crypto(parameters: {
-    secretKey: string
-    additional?: AdditionalNetworkEntry[] | undefined
-  }): Promise<readonly Method.AnyServer[]> {
-    const { secretKey, additional = [] } = parameters
-    const isTestMode = secretKey.includes('_test_')
-
-    // Built-in defaults
-    const defaults: AdditionalNetworkEntry[] = [{ network: 'tempo' }]
-
-    // Merge: additional entries override defaults with the same network name
-    const networkMap = new Map<string, AdditionalNetworkEntry>()
-    for (const entry of defaults) {
-      networkMap.set(entry.network, entry)
-    }
-    for (const entry of additional) {
-      networkMap.set(entry.network, entry)
-    }
-
-    // Resolve all deposit addresses in parallel
-    const entries = [...networkMap.values()]
-    const resolved = await Promise.all(
-      entries.map(async (entry) => ({
-        entry,
-        address: await resolveDepositAddress(secretKey, entry.network),
-      })),
-    )
-
-    const methods: Method.AnyServer[] = []
-
-    for (const { entry, address } of resolved) {
-      if (!address) continue
-
-      let methodOrMethods: Method.AnyServer | readonly Method.AnyServer[]
-
-      if ('configure' in entry) {
-        methodOrMethods = entry.configure(address)
-      } else if (entry.network === 'tempo') {
-        const { network: _, ...config } = entry
-        methodOrMethods = tempoCharge({
-          currency: (isTestMode
-            ? tempoDefaults.tokens.pathUsd
-            : tempoDefaults.tokens.usdc) as `0x${string}`,
-          recipient: address as `0x${string}`,
-          ...(isTestMode && { testnet: true }),
-          ...config,
-        })
-      } else if (entry.network === 'base') {
-        const { network: _, ...config } = entry
-        methodOrMethods = evmCharge({
-          currency: isTestMode ? EvmAssets.baseSepolia.USDC : EvmAssets.base.USDC,
-          recipient: address as `0x${string}`,
-          ...config,
-        })
-      } else {
-        continue
-      }
-
-      // Wrap with Stripe payment recording
-      const wrapped = Array.isArray(methodOrMethods)
-        ? (methodOrMethods as readonly Method.AnyServer[]).map((m) =>
-            wrapWithPaymentRecording(m, secretKey),
-          )
-        : [wrapWithPaymentRecording(methodOrMethods as Method.AnyServer, secretKey)]
-
-      methods.push(...wrapped)
-    }
-
-    return methods
-  }
-
   /** Creates a Stripe SPT charge method for card/link payments. */
   export const spt = charge_
 
   /** @deprecated Use `stripe.spt()` instead. */
   export const charge = charge_
+}
+
+async function resolveAdditionalNetworks(
+  secretKey: string,
+  isTestMode: boolean,
+  additional: AdditionalNetworkEntry[] | undefined,
+): Promise<Method.AnyServer[]> {
+  if (!additional || additional.length === 0) return []
+
+  const methods: Method.AnyServer[] = []
+
+  const resolved = await Promise.all(
+    additional
+      .filter((entry) => entry.network !== 'tempo')
+      .map(async (entry) => ({
+        entry,
+        address: await resolveDepositAddress(secretKey, entry.network),
+      })),
+  )
+
+  for (const { entry, address } of resolved) {
+    if (!address) continue
+
+    let methodOrMethods: Method.AnyServer | readonly Method.AnyServer[]
+
+    if ('configure' in entry) {
+      methodOrMethods = entry.configure(address)
+    } else if (entry.network === 'base') {
+      const { network: _, ...config } = entry
+      methodOrMethods = evmCharge({
+        currency: isTestMode ? EvmAssets.baseSepolia.USDC : EvmAssets.base.USDC,
+        recipient: address as `0x${string}`,
+        ...config,
+      })
+    } else {
+      continue
+    }
+
+    const wrapped = Array.isArray(methodOrMethods)
+      ? (methodOrMethods as readonly Method.AnyServer[]).map((m) =>
+          wrapWithPaymentRecording(m, secretKey),
+        )
+      : [wrapWithPaymentRecording(methodOrMethods as Method.AnyServer, secretKey)]
+
+    methods.push(...wrapped)
+  }
+
+  return methods
 }
 
 /**

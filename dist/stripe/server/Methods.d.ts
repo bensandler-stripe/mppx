@@ -13,6 +13,14 @@ type CustomNetworkEntry = {
     configure: (address: string) => Method.AnyServer | readonly Method.AnyServer[];
 };
 type AdditionalNetworkEntry = TempoNetworkEntry | BaseNetworkEntry | CustomNetworkEntry;
+type TempoChargeServer = Method.AnyServer & {
+    name: 'tempo';
+    intent: 'charge';
+};
+type StripeSptServer = Method.AnyServer & {
+    name: 'stripe';
+    intent: 'charge';
+};
 /**
  * Creates all Stripe-supported MPP payment methods from a single configuration.
  *
@@ -48,7 +56,7 @@ type AdditionalNetworkEntry = TempoNetworkEntry | BaseNetworkEntry | CustomNetwo
  * })
  * ```
  */
-export declare function stripe<const parameters extends stripe.Parameters>(parameters: parameters): Promise<readonly Method.AnyServer[]>;
+export declare function stripe<const parameters extends stripe.Parameters>(parameters: parameters): Promise<readonly [TempoChargeServer, StripeSptServer, ...Method.AnyServer[]]>;
 export declare namespace stripe {
     type Parameters = {
         /** Stripe secret API key. */
@@ -65,14 +73,6 @@ export declare namespace stripe {
     };
 }
 export declare namespace stripe {
-    /**
-     * Creates crypto payment methods. Tempo is always included.
-     * Additional entries are merged, with duplicates resolved by preferring the additional entry.
-     */
-    function crypto(parameters: {
-        secretKey: string;
-        additional?: AdditionalNetworkEntry[] | undefined;
-    }): Promise<readonly Method.AnyServer[]>;
     /** Creates a Stripe SPT charge method for card/link payments. */
     const spt: typeof charge_;
     /** @deprecated Use `stripe.spt()` instead. */
