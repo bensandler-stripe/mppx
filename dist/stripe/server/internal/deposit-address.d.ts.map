@@ -1,0 +1,1 @@
+{"version":3,"file":"deposit-address.d.ts","sourceRoot":"","sources":["../../../../src/stripe/server/internal/deposit-address.ts"],"names":[],"mappings":"AAEA,MAAM,MAAM,oBAAoB,GAAG;IACjC,OAAO,EAAE,MAAM,CAAA;IACf,OAAO,EAAE,MAAM,CAAA;CAChB,CAAA;AAED;;;GAGG;AACH,wBAAsB,qBAAqB,CACzC,SAAS,EAAE,MAAM,EACjB,OAAO,EAAE,MAAM,GACd,OAAO,CAAC,MAAM,GAAG,IAAI,CAAC,CA6BxB"}
