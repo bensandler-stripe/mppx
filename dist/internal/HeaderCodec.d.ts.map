@@ -1,0 +1,1 @@
+{"version":3,"file":"HeaderCodec.d.ts","sourceRoot":"","sources":["../../src/internal/HeaderCodec.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,KAAK,CAAC,MAAM,WAAW,CAAA;AAEnC;;;;;;GAMG;AACH,wBAAgB,UAAU,CAAC,KAAK,CAAC,MAAM,SAAS,CAAC,CAAC,WAAW,EAAE,MAAM,EAAE,MAAM;0CAInD,MAAM;kBAGd,MAAM;EAQvB;AAED,8EAA8E;AAC9E,qBAAa,sBAAuB,SAAQ,KAAK;IAC/C,SAAkB,IAAI,4BAA2B;;CAKlD"}
