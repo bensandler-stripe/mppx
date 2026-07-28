@@ -1,0 +1,1 @@
+{"version":3,"file":"record-payment.d.ts","sourceRoot":"","sources":["../../../../src/stripe/server/internal/record-payment.ts"],"names":[],"mappings":"AASA;;;GAGG;AACH,wBAAgB,mBAAmB,CAAC,UAAU,EAAE;IAC9C,SAAS,EAAE,MAAM,CAAA;IACjB,MAAM,EAAE,MAAM,CAAA;IACd,SAAS,EAAE,MAAM,CAAA;IACjB,MAAM,EAAE,MAAM,CAAA;CACf,GAAG,IAAI,CA+BP"}
