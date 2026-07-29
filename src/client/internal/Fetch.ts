@@ -19,8 +19,32 @@ type WrappedFetch = typeof globalThis.fetch & {
   [MPPX_FETCH_WRAPPER]?: typeof globalThis.fetch
 }
 
+/** Credential state retained between payment retries until its method settles it. */
+type PreparedCredential = {
+  /** Method-owned preparation and settlement hooks. */
+  attempt: MethodResponse.Attempt
+  /** Serialized challenge used to recognize the same retry. */
+  key?: string | undefined
+  /** Method that prepared the credential. */
+  method: Method.AnyClient
+  /** Memoized credential reused for the same retry. */
+  promise: Promise<string>
+}
+
 let originalFetch: typeof globalThis.fetch | undefined
 const eventObserverChecks = new WeakMap<object, (name: keyof ClientEventMap) => boolean>()
+
+async function settleAttempt(
+  prepared: PreparedCredential | undefined,
+  outcome: MethodResponse.AttemptOutcome,
+): Promise<boolean> {
+  const settle = prepared?.attempt.settle
+  if (!settle) return outcome.status !== 'pending'
+  prepared.attempt.settle = undefined
+  const settled = await settle(outcome)
+  if (!settled) prepared.attempt.settle = settle
+  return settled
+}
 
 export type ClientEventMap<
   methods extends readonly Method.AnyClient[] = readonly Method.AnyClient[],
@@ -210,9 +234,7 @@ export function from<const methods extends readonly Method.AnyClient[]>(
     let challenge: Challenge.Challenge | undefined
     let challenges: readonly Challenge.Challenge[] | undefined
     let mi: methods[number] | undefined
-    let preparedCredential:
-      | { key: string; method: Method.AnyClient; promise: Promise<string> }
-      | undefined
+    let preparedCredential: PreparedCredential | undefined
 
     try {
       for (let retry = 0; retry < maxPaymentRetries; retry++) {
@@ -232,6 +254,11 @@ export function from<const methods extends readonly Method.AnyClient[]>(
         )
         const selected = orderedCandidates[0]
         if (!selected) {
+          await settleAttempt(preparedCredential, {
+            challenges,
+            response,
+            status: 'rejected',
+          })
           // A post-payment 402 with no actionable challenge (e.g. rejected credential)
           // is the server's final answer, not a new challenge round.
           if (retry > 0) return response
@@ -251,33 +278,52 @@ export function from<const methods extends readonly Method.AnyClient[]>(
           initialRequest.input,
         )
         const previousCredential = preparedCredential
-        preparedCredential = undefined
+        const key = Challenge.serialize(selectedChallenge)
+        const sameAttempt =
+          previousCredential?.method === selected.method && previousCredential?.key === key
+        let canReusePrevious = false
+        if (previousCredential) {
+          const settled = await settleAttempt(previousCredential, {
+            challenges,
+            response,
+            status: sameAttempt ? 'pending' : 'rejected',
+          })
+          canReusePrevious = sameAttempt && !settled
+        }
+        preparedCredential = canReusePrevious ? previousCredential : undefined
         const createCredential = memoizeCreateCredential(
-          (overrideContext?: AnyContextFor<methods>) => {
-            const create = async () => {
-              const credentialContext = overrideContext ?? context
-              await MethodChallenge.handle(selected.method, {
-                challenge: selectedChallenge,
-                context: credentialContext,
-                fetch: baseFetch,
-                input: paymentInput,
-              })
-              return resolveCredential(selectedChallenge, selected.method, credentialContext)
-            }
-            if (overrideContext !== undefined || !MethodChallenge.has(selected.method))
-              return create()
-
-            const key = Challenge.serialize(selectedChallenge)
-            if (
-              previousCredential &&
-              previousCredential.method === selected.method &&
-              previousCredential.key === key
-            ) {
-              preparedCredential = previousCredential
+          async (overrideContext?: AnyContextFor<methods>) => {
+            if (overrideContext === undefined && canReusePrevious && previousCredential) {
               return previousCredential.promise
             }
-            const promise = create()
-            preparedCredential = { key, method: selected.method, promise }
+            if (canReusePrevious && previousCredential) {
+              await settleAttempt(previousCredential, { status: 'rejected' })
+              preparedCredential = undefined
+            }
+
+            const credentialContext = overrideContext ?? context
+            if (!MethodChallenge.has(selected.method))
+              return resolveCredential(selectedChallenge, selected.method, credentialContext)
+            const attempt: MethodResponse.Attempt = {
+              prepare: () =>
+                MethodChallenge.handle(selected.method, {
+                  challenge: selectedChallenge,
+                  context: credentialContext,
+                  fetch: baseFetch,
+                  input: paymentInput,
+                }),
+            }
+            const promise = attempt
+              .prepare()
+              .then(() =>
+                resolveCredential(selectedChallenge, selected.method, credentialContext, attempt),
+              )
+            preparedCredential = {
+              attempt,
+              key: overrideContext === undefined ? key : undefined,
+              method: selected.method,
+              promise,
+            }
             return promise
           },
         )
@@ -301,6 +347,11 @@ export function from<const methods extends readonly Method.AnyClient[]>(
               })
             : undefined)
         const credential = onChallengeCredential ?? (await createCredential())
+        const prepared = preparedCredential
+        if (prepared && (await prepared.promise.catch(() => undefined)) !== credential) {
+          await settleAttempt(prepared, { status: 'rejected' })
+          preparedCredential = undefined
+        }
         validateCredentialHeaderValue(credential)
         await events.emit(
           'credential.created',
@@ -325,6 +376,17 @@ export function from<const methods extends readonly Method.AnyClient[]>(
             { challenge: selectedChallenge },
           ),
         )
+        const paymentRequired = await transport.isPaymentRequired(
+          response,
+          transportRequest as never,
+        )
+        if (!paymentRequired) {
+          await settleAttempt(prepared, {
+            response,
+            status: response.ok ? 'accepted' : 'rejected',
+          })
+          preparedCredential = undefined
+        }
         // Cloning an unobserved stream would tee and buffer it indefinitely.
         if (response.ok && hasEventObservers(events, 'payment.response'))
           await events.emit(
@@ -338,7 +400,7 @@ export function from<const methods extends readonly Method.AnyClient[]>(
               response,
             }),
           )
-        if (!(await transport.isPaymentRequired(response, transportRequest as never))) {
+        if (!paymentRequired) {
           if (!response.ok) return response
           return MethodResponse.handle(selected.method, {
             challenge: selectedChallenge,
@@ -356,8 +418,24 @@ export function from<const methods extends readonly Method.AnyClient[]>(
           })
         }
       }
+      challenges = undefined
+      try {
+        challenges = transport.getChallenges
+          ? await transport.getChallenges(response, transportRequest as never)
+          : [await transport.getChallenge(response, transportRequest as never)]
+      } catch {}
+      await settleAttempt(preparedCredential, {
+        challenges,
+        response,
+        status: 'rejected',
+      })
       return response
     } catch (error) {
+      await settleAttempt(preparedCredential, {
+        challenges,
+        response,
+        status: 'rejected',
+      })
       await events.emit(
         'payment.failed',
         createPaymentFailedPayload({
@@ -906,11 +984,13 @@ async function resolveCredential(
   challenge: Challenge.Challenge,
   mi: Method.AnyClient,
   context: unknown,
+  attempt?: MethodResponse.Attempt | undefined,
 ): Promise<string> {
   const parsedContext = mi.context && context !== undefined ? mi.context.parse(context) : undefined
-  return mi.createCredential(
-    parsedContext !== undefined ? { challenge, context: parsedContext } : ({ challenge } as never),
-  )
+  const parameters =
+    parsedContext !== undefined ? { challenge, context: parsedContext } : { challenge }
+  if (attempt) MethodResponse.attachAttempt(mi, parameters, attempt)
+  return mi.createCredential(parameters as never)
 }
 
 function resolvePaymentPreferences<methods extends readonly Method.AnyClient[]>(

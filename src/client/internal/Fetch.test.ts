@@ -338,6 +338,23 @@ const noopMethod = {
   createCredential: async () => 'credential',
 } as any
 
+function trackedMethod(settlements: MethodResponse.AttemptOutcome['status'][]) {
+  const method = {
+    ...noopMethod,
+    async createCredential(parameters: object) {
+      const attempt = MethodResponse.getAttempt(parameters)
+      if (attempt)
+        attempt.settle = (outcome) => {
+          settlements.push(outcome.status)
+          return outcome.status !== 'pending'
+        }
+      return 'credential'
+    },
+  }
+  MethodChallenge.register(method, () => undefined)
+  return MethodResponse.register(method, ({ response }) => response)
+}
+
 const x402PaymentRequired = {
   accepts: [
     {
@@ -418,6 +435,30 @@ describe('Fetch.from: method responses', () => {
     expect(handle).toHaveBeenCalledOnce()
     expect(handle).toHaveBeenCalledWith(expect.objectContaining({ credential: 'credential' }))
     expect(paidResponse?.clone).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['a rejected paid response', () => new Response('rejected', { status: 500 }), 500, undefined],
+    ['the final payment retry', () => make402(), 402, 1],
+    [
+      'the paid request throwing',
+      () => Promise.reject(new Error('paid request failed')),
+      undefined,
+      undefined,
+    ],
+  ])('settles credential state after %s', async (_name, paidRequest, status, maxPaymentRetries) => {
+    const settlements: MethodResponse.AttemptOutcome['status'][] = []
+    let calls = 0
+    const fetch = Fetch.from({
+      fetch: async () => (++calls === 1 ? make402() : paidRequest()),
+      maxPaymentRetries,
+      methods: [trackedMethod(settlements)],
+    })
+
+    const result = fetch('https://example.com/paid')
+    if (status) expect((await result).status).toBe(status)
+    else await expect(result).rejects.toThrow('paid request failed')
+    expect(settlements).toEqual(['rejected'])
   })
 })
 

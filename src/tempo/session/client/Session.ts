@@ -3,6 +3,7 @@ import { tempo as tempo_chain } from 'viem/chains'
 
 import * as MethodChallenge from '../../../client/internal/MethodChallenge.js'
 import * as MethodResponse from '../../../client/internal/MethodResponse.js'
+import * as Constants from '../../../Constants.js'
 import * as Credential from '../../../Credential.js'
 import * as Method from '../../../Method.js'
 import * as Account from '../../../viem/Account.js'
@@ -16,6 +17,7 @@ import * as defaults from '../../internal/defaults.js'
 import * as Methods from '../../Methods.js'
 import * as Channel from '../precompile/Channel.js'
 import {
+  deserializeSessionReceipt,
   isEventStream,
   readSessionChallengeAmount,
   requireSessionCredentialContext,
@@ -35,6 +37,7 @@ import {
 } from './CredentialState.js'
 import { assertWithinMaxDeposit, resolveAutomaticTopUp } from './Runtime.js'
 import {
+  getSessionSnapshot,
   handleSseNeedVoucher,
   isTip1034SessionChallenge,
   postTopUp,
@@ -44,6 +47,67 @@ import {
 } from './Transports.js'
 
 export { sessionContextSchema, type SessionContext } from './CredentialState.js'
+
+/** Tail promise for each payment scope, used to serialize automatic opens per store. */
+const channelTails = new WeakMap<ChannelStore, Map<string, Promise<void>>>()
+
+/** Serializes automatic opens for one payment scope across methods sharing a store. */
+async function lockChannel(store: ChannelStore, key: string) {
+  const tails = channelTails.get(store) ?? new Map<string, Promise<void>>()
+  channelTails.set(store, tails)
+  const previous = tails.get(key)
+  let unlock!: () => void
+  const current = new Promise<void>((resolve) => {
+    unlock = resolve
+  })
+  tails.set(key, current)
+  await previous
+  return () => {
+    unlock()
+    if (tails.get(key) === current) tails.delete(key)
+  }
+}
+
+function matchesOpen(
+  opened: ChannelEntry,
+  acknowledgement: { acceptedCumulative: string; channelId: string } | null | undefined,
+): boolean {
+  try {
+    return (
+      acknowledgement?.channelId.toLowerCase() === opened.channelId.toLowerCase() &&
+      BigInt(acknowledgement.acceptedCumulative) === opened.cumulativeAmount
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Returns whether the server acknowledged an open.
+ *
+ * Receipts must match the originating challenge, channel, and cumulative amount.
+ * Replacement challenges may acknowledge the same channel and amount through a
+ * session snapshot. Malformed acknowledgements are ignored.
+ */
+function acknowledgesOpen(
+  outcome: MethodResponse.AttemptOutcome,
+  challenge: TempoSessionChallenge,
+  opened: ChannelEntry,
+): boolean {
+  try {
+    const receiptHeader = outcome.response?.headers.get(Constants.Headers.paymentReceipt)
+    if (receiptHeader) {
+      const receipt = deserializeSessionReceipt(receiptHeader)
+      if (receipt.challengeId === challenge.id && matchesOpen(opened, receipt)) return true
+    }
+  } catch {}
+  return (
+    outcome.challenges?.some((candidate) => {
+      if (!isTip1034SessionChallenge(candidate)) return false
+      return matchesOpen(opened, getSessionSnapshot(candidate))
+    }) ?? false
+  )
+}
 
 /**
  * Creates the low-level TIP-1034 session payment method for use with `Mppx.create()`.
@@ -100,30 +164,102 @@ export function session(parameters: session.Parameters = {}) {
     )
   }
 
+  const resolveCredentialPlan = async (
+    resolved: ChallengeContext,
+    context: CredentialContext | undefined,
+    entry: ChannelEntry | undefined,
+  ) =>
+    planCredential({
+      account: await resolveCredentialAccount(resolved, context, entry),
+      entry,
+      context,
+      decimals,
+      maxDeposit,
+      resolved,
+    })
+
   const method = Method.toClient(Methods.session, {
     canHandleChallenge: ({ challenge }) => isTip1034SessionChallenge(challenge),
     context: sessionContextSchema,
-    async createCredential({ challenge, context }) {
+    async createCredential(parameters) {
+      const { challenge, context } = parameters
       const resolved = await resolveChallengeContext({
         challenge,
         escrowOverride,
         getClient,
       })
-      const entry = await store.get(resolved.key)
-      const account = await resolveCredentialAccount(resolved, context, entry)
-      const payload = await executeCredentialPlan(
-        planCredential({
-          account,
-          entry,
-          context,
-          decimals,
-          maxDeposit,
-          resolved,
-        }),
-        sink,
-        AutoSwap.resolve(context?.autoSwap ?? autoSwapParameter, AutoSwap.defaultCurrencies),
-      )
-      return serializeCredential(challenge, payload, resolved.chainId, account)
+      const attempt = MethodResponse.getAttempt(parameters)
+      let release = () => {}
+      try {
+        let entry = await store.get(resolved.key)
+        let plan = await resolveCredentialPlan(resolved, context, entry)
+        if (attempt && plan.type === 'open') {
+          release = await lockChannel(store, resolved.key)
+          const nextEntry = await store.get(resolved.key)
+          if (nextEntry?.channelId !== entry?.channelId) {
+            entry = nextEntry
+            if (entry?.opened) {
+              await attempt.prepare()
+              entry = await store.get(resolved.key)
+            }
+            plan = await resolveCredentialPlan(resolved, context, entry)
+          }
+        }
+        let pendingOpen: ChannelEntry | undefined
+        // Defer opens only when low-level Fetch owns the response lifecycle.
+        // SessionManager unregisters this hook and keeps its existing transaction boundary.
+        const credentialSink =
+          attempt && plan.type === 'open'
+            ? {
+                store: {
+                  get: (key: string) => store.get(key),
+                  async set(next: ChannelEntry) {
+                    pendingOpen = next
+                  },
+                  delete: (key: string) => store.delete(key),
+                },
+                notifyUpdate() {},
+              }
+            : sink
+        const payload = await executeCredentialPlan(
+          plan,
+          credentialSink,
+          AutoSwap.resolve(context?.autoSwap ?? autoSwapParameter, AutoSwap.defaultCurrencies),
+        )
+        const credential = await serializeCredential(
+          challenge,
+          payload,
+          resolved.chainId,
+          plan.account,
+        )
+        if (attempt && pendingOpen) {
+          const opened = pendingOpen
+          attempt.settle = async (outcome) => {
+            const accepted =
+              outcome.status === 'accepted' || acknowledgesOpen(outcome, challenge, opened)
+            if (!accepted && outcome.status === 'pending') return false
+            try {
+              if (accepted) {
+                const current = await store.get(resolved.key)
+                if (
+                  !current?.opened ||
+                  current.channelId.toLowerCase() !== opened.channelId.toLowerCase()
+                ) {
+                  await store.set(opened)
+                  sink.notifyUpdate(opened)
+                }
+              }
+              return true
+            } finally {
+              release()
+            }
+          }
+        } else release()
+        return credential
+      } catch (error) {
+        release()
+        throw error
+      }
     },
   })
 
