@@ -114,6 +114,7 @@ export default defineConfig({
       'no-shadow-restricted-names': 'off',
       'no-shadow': 'off',
       'no-control-regex': 'off',
+      'no-underscore-dangle': 'off',
     },
     settings: {
       polyfills: ['PaymentRequest', 'URLPattern', 'crypto', 'navigator'],
