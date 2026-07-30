@@ -1968,6 +1968,40 @@ describe('compose', () => {
     expect(wwwAuth).toContain('method="beta"')
   })
 
+  test('retains only explicitly configured offers as composed discovery metadata', () => {
+    const mppx = Mppx.create({ methods: [alphaMethod, betaMethod], realm, secretKey })
+    const configured = mppx.compose([alphaMethod, challengeOpts], [betaMethod, challengeOpts])
+
+    expect(configured._internal?.offers).toMatchObject([
+      {
+        _canonicalRequest: {
+          amount: challengeOpts.amount,
+          currency: challengeOpts.currency,
+          recipient: challengeOpts.recipient,
+        },
+        intent: 'charge',
+        name: 'alpha',
+      },
+      {
+        _canonicalRequest: {
+          amount: challengeOpts.amount,
+          currency: challengeOpts.currency,
+          recipient: challengeOpts.recipient,
+        },
+        intent: 'charge',
+        name: 'beta',
+      },
+    ])
+
+    const custom = async () =>
+      ({
+        status: 402,
+        challenge: new Response(null, { status: 402 }),
+      }) as const
+    const composed = Mppx.compose(mppx.alpha.charge(challengeOpts), custom)
+    expect(composed._internal?.offers).toMatchObject([{ intent: 'charge', name: 'alpha' }])
+  })
+
   test('broadcasts duplicate tempo/session variants in compose order', async () => {
     const mppx = Mppx.create({
       methods: [tip1034SessionMethod, legacySessionMethod],
@@ -2415,6 +2449,34 @@ describe('compose', () => {
     const challenges = Challenge.fromResponseList(firstResult.challenge)
     const betaChallenge = challenges[1]!
 
+    const credential = Credential.from({
+      challenge: betaChallenge,
+      payload: { token: 'valid' },
+    })
+
+    const result = await handle(
+      new Request('https://example.com/resource', {
+        headers: { Authorization: Credential.serialize(credential) },
+      }),
+    )
+
+    expect(result.status).toBe(200)
+  })
+
+  test('dispatches credentials to a nested composed handler', async () => {
+    const mppx = Mppx.create({ methods: [alphaMethod, betaMethod], realm, secretKey })
+    const handle = Mppx.compose(
+      mppx.alpha.charge(challengeOpts),
+      Mppx.compose(mppx.beta.charge(challengeOpts)),
+    )
+
+    const firstResult = await handle(new Request('https://example.com/resource'))
+    expect(firstResult.status).toBe(402)
+    if (firstResult.status !== 402) throw new Error()
+
+    const betaChallenge = Challenge.fromResponseList(firstResult.challenge).find(
+      (challenge) => challenge.method === 'beta',
+    )!
     const credential = Credential.from({
       challenge: betaChallenge,
       payload: { token: 'valid' },

@@ -1,4 +1,4 @@
-import { Value } from 'ox'
+import * as Metadata from '../discovery/internal/Metadata.js'
 
 /** A proxied upstream service with route definitions and optional request/response hooks. */
 export type Service = {
@@ -206,31 +206,16 @@ export function getOptions(endpoint: Endpoint): EndpointOptions | undefined {
   return undefined
 }
 
+/** Derives discovery payment metadata from an explicitly priced endpoint handler. */
 export function paymentOf(endpoint: Endpoint): Record<string, unknown> | null {
   if (endpoint === true) return null
   const handler = typeof endpoint === 'function' ? endpoint : endpoint.pay
   if (!('_internal' in handler)) return null
-  const {
-    name,
-    intent,
-    defaults: _,
-    schema: _s,
-    _canonicalRequest,
-    _stableBinding: _sb,
-    authorize: _a,
-    request: _r,
-    respond: _re,
-    stableBinding: _st,
-    transport: _t,
-    verify: _v,
-    ...rest
-  } = handler._internal as Record<string, unknown>
-  const amount = (() => {
-    if (typeof rest.amount === 'string' && typeof rest.decimals === 'number')
-      return String(Value.from(rest.amount, rest.decimals))
-    return rest.amount
-  })()
-  return { intent, method: name, ...rest, ...(amount !== undefined && { amount }) }
+  const metadata = handler._internal as Metadata.Metadata | undefined
+  if (!metadata) return null
+  if (Metadata.isComposed(metadata))
+    return { offers: Metadata.offers(metadata).map(Metadata.paymentOffer) }
+  return Metadata.paymentOffer(metadata)
 }
 
 function resolveDocs(config: from.Config): Docs | undefined {

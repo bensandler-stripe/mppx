@@ -227,9 +227,7 @@ export type Mppx<
        * })
        * ```
        */
-      compose(
-        ...entries: ComposeEntry<FlattenMethods<methods>>[]
-      ): (input: Request) => Promise<MethodFn.Response<Transport.Http>>
+      compose(...entries: ComposeEntry<FlattenMethods<methods>>[]): ComposedHandler
     }
   : {}) &
   Handlers<FlattenMethods<methods>, transport> & {
@@ -2169,6 +2167,7 @@ declare namespace MethodFn {
 /** A configured handler — the return value of e.g. `mppx.charge({ ... })`. @internal */
 type ConfiguredHandler = ((input: Request) => Promise<MethodFn.Response<Transport.Http>>) & {
   _internal: {
+    description?: string | undefined
     name: string
     intent: string
     html: Html.Options | undefined
@@ -2178,6 +2177,16 @@ type ConfiguredHandler = ((input: Request) => Promise<MethodFn.Response<Transpor
     _stableBinding?: Method.StableBindingFn<Method.Method> | undefined
   }
 }
+
+type ComposedHandler = ((input: Request) => Promise<MethodFn.Response<Transport.Http>>) & {
+  _internal?: {
+    offers: readonly ConfiguredHandler['_internal'][]
+  }
+}
+
+type HandlerDiscoveryMetadata =
+  | ConfiguredHandler['_internal']
+  | NonNullable<ComposedHandler['_internal']>
 
 const paymentAuthChallengeHeader = Constants.Headers.wwwAuthenticate
 
@@ -2252,9 +2261,7 @@ type ComposeEntry<methods extends readonly Method.AnyServer[]> =
  */
 type ComposeHtmlOptions = Html.Config
 
-export function compose(
-  ...args: readonly unknown[]
-): (input: Request) => Promise<MethodFn.Response<Transport.Http>> {
+export function compose(...args: readonly unknown[]): ComposedHandler {
   // Extract optional html options from last argument
   const last = args[args.length - 1]
   const composeOptions: Html.Options | undefined =
@@ -2279,7 +2286,7 @@ export function compose(
 
   if (handlers.length === 0) throw new Error('compose() requires at least one handler')
 
-  return async (input: Request) => {
+  const composed: ComposedHandler = async (input: Request) => {
     // Serve service worker for html-enabled compose
     if (new URL(input.url).searchParams.has(Html.params.serviceWorker)) {
       const hasHtml = handlers.some((h) => (h as ConfiguredHandler)._internal?.html)
@@ -2314,33 +2321,34 @@ export function compose(
         const credReq = credential.challenge.request as Record<string, unknown>
 
         // Filter by name+intent, then narrow by comparing stable request fields
-        // from the echoed challenge against each handler's canonical request.
+        // from the echoed challenge against each handler's configured offers.
         // Uses the schema-parsed canonical form (not raw options) so that
         // transformed fields (e.g. amount with decimals) match correctly.
         // Also checks inside methodDetails for fields moved there by transforms.
-        const candidates = handlers.filter((h) => {
-          try {
-            const internal = (h as ConfiguredHandler)._internal
-            if (!internal || internal.name !== credMethod || internal.intent !== credIntent)
+        const candidates = handlers.filter((handler) =>
+          getConfiguredOffers(handler).some((internal) => {
+            try {
+              if (internal.name !== credMethod || internal.intent !== credIntent) return false
+              const mismatch = internal._stableBinding
+                ? getRequestBindingMismatch(
+                    getStableBinding(internal._canonicalRequest, internal._stableBinding),
+                    getStableBinding(credReq, internal._stableBinding),
+                  )
+                : getPinnedRequestBindingMismatch(internal._canonicalRequest, credReq)
+              return !mismatch && opaqueValuesMatch(internal.meta, credential.challenge.meta)
+            } catch {
               return false
-            const mismatch = internal._stableBinding
-              ? getRequestBindingMismatch(
-                  getStableBinding(internal._canonicalRequest, internal._stableBinding),
-                  getStableBinding(credReq, internal._stableBinding),
-                )
-              : getPinnedRequestBindingMismatch(internal._canonicalRequest, credReq)
-            return !mismatch && opaqueValuesMatch(internal.meta, credential.challenge.meta)
-          } catch {
-            return false
-          }
-        })
+            }
+          }),
+        )
 
         const match =
           candidates[0] ??
-          handlers.find((h) => {
-            const meta = (h as ConfiguredHandler)._internal
-            return meta?.name === credMethod && meta?.intent === credIntent
-          })
+          handlers.find((handler) =>
+            getConfiguredOffers(handler).some(
+              (internal) => internal.name === credMethod && internal.intent === credIntent,
+            ),
+          )
         if (match) return match(input)
       }
 
@@ -2501,6 +2509,26 @@ export function compose(
       challenge: new Response(body, { status: 402, headers: mergedHeaders }),
     }
   }
+
+  const offers = handlers.flatMap(getConfiguredOffers)
+  if (offers.length > 0) composed._internal = { offers }
+  return composed
+}
+
+/** Returns the flattened configured offers accepted by a handler. */
+function getConfiguredOffers(
+  handler: ConfiguredHandler | ComposedHandler,
+): readonly ConfiguredHandler['_internal'][] {
+  const internal = handler._internal
+  if (!internal) return []
+  if (isComposedHandlerMetadata(internal)) return internal.offers
+  return [internal]
+}
+
+function isComposedHandlerMetadata(
+  internal: HandlerDiscoveryMetadata,
+): internal is NonNullable<ComposedHandler['_internal']> {
+  return 'offers' in internal && !('_canonicalRequest' in internal)
 }
 
 type ChallengeHeaderMerge = {

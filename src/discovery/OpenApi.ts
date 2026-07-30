@@ -1,12 +1,11 @@
 import type * as Method from '../Method.js'
+import * as PaymentRequest from '../PaymentRequest.js'
 import { PaymentInfo, type ServiceInfo } from './Discovery.js'
+import * as Metadata from './internal/Metadata.js'
 
+/** Payment handler carrying metadata used to generate discovery documents. */
 export type DiscoveryHandler = ((...args: any[]) => unknown) & {
-  _internal?: {
-    _canonicalRequest: Record<string, unknown>
-    intent: string
-    name: string
-  }
+  _internal?: Metadata.Metadata
 }
 
 export type LegacyRouteConfig = {
@@ -151,11 +150,9 @@ function resolveRoute(
     return {
       method: route.method,
       path: route.path,
-      payment: paymentInfoFromCanonical({
-        canonicalRequest: internal._canonicalRequest,
-        intent: internal.intent,
-        method: internal.name,
-      }),
+      payment: {
+        offers: Metadata.offers(internal).map(Metadata.paymentOffer),
+      },
       ...(route.requestBody ? { requestBody: route.requestBody } : {}),
       ...(route.summary ? { summary: route.summary } : {}),
     }
@@ -168,50 +165,21 @@ function resolveRoute(
     )
   }
 
+  const { description, ...options } = route.options
+  const metadata: Metadata.Offer = {
+    _canonicalRequest: PaymentRequest.fromMethod(mi, options as never),
+    ...(typeof description === 'string' ? { description } : {}),
+    intent: mi.intent,
+    name: mi.name,
+  }
+
   return {
     method: route.method,
     path: route.path,
-    payment: paymentInfoFromCanonical({
-      canonicalRequest: route.options,
-      intent: mi.intent,
-      method: mi.name,
-    }),
+    payment: Metadata.paymentOffer(metadata),
     ...(route.requestBody ? { requestBody: route.requestBody } : {}),
     ...(route.summary ? { summary: route.summary } : {}),
   }
-}
-
-function paymentInfoFromCanonical(route: {
-  canonicalRequest: Record<string, unknown>
-  intent: string
-  method: string
-}) {
-  const { canonicalRequest, intent, method } = route
-  const methodDetails = (canonicalRequest.methodDetails ?? {}) as Record<string, unknown>
-
-  const amount = pickString(canonicalRequest.amount) ?? pickString(methodDetails.amount) ?? null
-  const currency = pickString(canonicalRequest.currency) ?? pickString(methodDetails.currency)
-  const description = pickString(canonicalRequest.description)
-
-  const base: Record<string, unknown> = {
-    amount,
-    ...(currency ? { currency } : {}),
-    ...(description ? { description } : {}),
-    intent,
-    method,
-  }
-
-  // Forward any extra canonical params that aren't already covered.
-  const reserved = new Set(['amount', 'currency', 'description', 'methodDetails'])
-  for (const [key, value] of Object.entries(canonicalRequest)) {
-    if (!reserved.has(key) && value !== undefined) base[key] = value
-  }
-
-  return base
-}
-
-function pickString(value: unknown) {
-  return typeof value === 'string' ? value : undefined
 }
 
 function withBasePath(basePath: string | undefined, path: string) {
