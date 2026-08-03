@@ -48,6 +48,9 @@ jobs:
             echo "✓ No pnpm.overrides in package.json"
           fi
 
+      - name: Ensure package.json versions match workspace overrides
+        run: pnpm exec tsx scripts/check-override-drift.ts
+
       - name: Audit dependencies
         # npm's legacy audit endpoint is returning 410 Gone. Keep the audit
         # check enabled, but don't fail CI on registry-level audit outages.
