@@ -316,8 +316,8 @@ function readTransactionType(value: unknown): 'transaction' {
   throw new VerificationFailedError({ reason: 'invalid session credential transaction type' })
 }
 
-/** Shared inputs required to verify a single precompile session credential payload. */
-export type VerifyCredentialPayloadParameters = {
+/** Shared inputs required to broadcast a verified precompile session credential payload. */
+export type BroadcastCredentialPayloadParameters = {
   /** Optional account override used for payee-side close settlement. */
   account?: viem_Account | undefined
   /** Challenge echoed by the credential. */
@@ -352,24 +352,31 @@ export type VerifyCredentialPayloadParameters = {
   store: ChannelStore.ChannelStore
 }
 
-/** Narrows shared credential verification inputs to one payload action. */
-export type VerifyCredentialActionParameters<action extends SessionCredentialPayload['action']> =
-  Omit<VerifyCredentialPayloadParameters, 'payload'> & {
+/** @deprecated Use {@link BroadcastCredentialPayloadParameters}. */
+export type VerifyCredentialPayloadParameters = BroadcastCredentialPayloadParameters
+
+/** Narrows shared credential broadcast inputs to one payload action. */
+export type BroadcastCredentialActionParameters<action extends SessionCredentialPayload['action']> =
+  Omit<BroadcastCredentialPayloadParameters, 'payload'> & {
     /** Credential payload for the selected action. */
     payload: Extract<SessionCredentialPayload, { action: action }>
   }
 
-/** Inputs for verifying an open transaction credential and initial voucher. */
-export type OpenCredentialActionParameters = VerifyCredentialActionParameters<'open'>
+/** @deprecated Use {@link BroadcastCredentialActionParameters}. */
+export type VerifyCredentialActionParameters<action extends SessionCredentialPayload['action']> =
+  BroadcastCredentialActionParameters<action>
 
-/** Inputs for verifying a top-up transaction credential. */
-export type TopUpCredentialActionParameters = VerifyCredentialActionParameters<'topUp'>
+/** Inputs for broadcasting an open transaction credential and initial voucher. */
+export type OpenCredentialActionParameters = BroadcastCredentialActionParameters<'open'>
 
-/** Inputs for verifying and accepting an incremental voucher credential. */
-export type VoucherCredentialActionParameters = VerifyCredentialActionParameters<'voucher'>
+/** Inputs for broadcasting a top-up transaction credential. */
+export type TopUpCredentialActionParameters = BroadcastCredentialActionParameters<'topUp'>
 
-/** Inputs for verifying and settling a cooperative close credential. */
-export type CloseCredentialActionParameters = VerifyCredentialActionParameters<'close'>
+/** Inputs for broadcasting and accepting an incremental voucher credential. */
+export type VoucherCredentialActionParameters = BroadcastCredentialActionParameters<'voucher'>
+
+/** Inputs for broadcasting and settling a cooperative close credential. */
+export type CloseCredentialActionParameters = BroadcastCredentialActionParameters<'close'>
 
 const refreshOnChainVerificationCache = {
   close: false,
@@ -378,18 +385,323 @@ const refreshOnChainVerificationCache = {
   voucher: false,
 } satisfies Record<SessionCredentialPayload['action'], boolean>
 
-/** Verifies a session credential payload and applies the action-specific state transition. */
-export async function verifyCredentialPayload(
-  context: VerifyCredentialPayloadParameters,
+/** Inputs for validating a session credential without applying its state transition. */
+export type ValidateCredentialPayloadParameters = Pick<
+  BroadcastCredentialPayloadParameters,
+  | 'account'
+  | 'channelStateTtl'
+  | 'chainId'
+  | 'client'
+  | 'credentialSource'
+  | 'escrow'
+  | 'expectedOperator'
+  | 'feePayer'
+  | 'feePayerPolicy'
+  | 'lastOnChainVerified'
+  | 'minVoucherDelta'
+  | 'payload'
+  | 'store'
+  | 'challenge'
+>
+
+/** Non-mutating result produced by session credential validation. */
+export type CredentialPayloadValidation = {
+  /** Session action validated from the credential. */
+  action: SessionCredentialPayload['action']
+  /** Normalized channel ID targeted by the credential. */
+  channelId: Hex
+}
+
+/** Validates all action-specific session credential invariants without changing payment state. */
+export async function validateCredentialPayload(
+  parameters: ValidateCredentialPayloadParameters,
+): Promise<CredentialPayloadValidation> {
+  const { payload } = parameters
+  switch (payload.action) {
+    case 'open':
+      await validateOpenCredential(parameters, payload)
+      break
+    case 'topUp':
+      await validateTopUpCredential(parameters, payload)
+      break
+    case 'voucher':
+      await validateVoucherCredential(parameters, payload)
+      break
+    case 'close':
+      await validateCloseCredential(parameters, payload)
+      break
+  }
+  return { action: payload.action, channelId: ChannelStore.normalizeChannelId(payload.channelId) }
+}
+
+async function validateOpenCredential(
+  parameters: ValidateCredentialPayloadParameters,
+  payload: Extract<SessionCredentialPayload, { action: 'open' }>,
+) {
+  const { challenge, chainId, client, escrow } = parameters
+  const request = getChallengePaymentFields(challenge)
+  const expectedOperator = parameters.expectedOperator ?? zeroAddress
+  const cumulativeAmount = uint96(BigInt(payload.cumulativeAmount))
+  assertDescriptor(payload)
+  if (
+    payload.authorizedSigner !== undefined &&
+    !isAddressEqual(payload.authorizedSigner, payload.descriptor.authorizedSigner)
+  )
+    throw new VerificationFailedError({
+      reason: 'credential authorizedSigner does not match descriptor',
+    })
+  const channelId = ChannelStore.normalizeChannelId(payload.channelId)
+  validateChannelDescriptor(
+    payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    request.recipient,
+    request.currency,
+    expectedOperator,
+  )
+  const transaction = Chain.validateOpenCredentialTransaction({
+    challengeExpires: challenge.expires,
+    chainId,
+    escrowContract: escrow,
+    expectedAuthorizedSigner: payload.descriptor.authorizedSigner,
+    expectedChannelId: channelId,
+    expectedCurrency: request.currency,
+    expectedOperator,
+    expectedPayee: request.recipient,
+    expectedExpiringNonceHash: payload.descriptor.expiringNonceHash,
+    expectedPayer: payload.descriptor.payer,
+    feePayer: parameters.feePayer,
+    feePayerPolicy: parameters.feePayerPolicy,
+    serializedTransaction: payload.transaction,
+  })
+  assertOpenCredentialCoversRequest({
+    cumulativeAmount,
+    openDeposit: transaction.openDeposit,
+    requestAmount: request.amount,
+  })
+  assertSameDescriptor(transaction.descriptor, payload.descriptor)
+  if (cumulativeAmount > transaction.openDeposit)
+    throw new AmountExceedsDepositError({ reason: 'voucher amount exceeds open deposit' })
+  const valid = await Voucher.verifyVoucher(
+    escrow,
+    chainId,
+    { channelId, cumulativeAmount, signature: payload.signature },
+    authorizedSigner(transaction.descriptor),
+  )
+  if (!valid) throw new InvalidSignatureError({ reason: 'invalid voucher signature' })
+  await Chain.simulateCredentialTransaction({
+    client,
+    feePayer: parameters.feePayer,
+    transaction: transaction.transaction,
+  })
+}
+
+async function validateTopUpCredential(
+  parameters: ValidateCredentialPayloadParameters,
+  payload: Extract<SessionCredentialPayload, { action: 'topUp' }>,
+) {
+  const { challenge, chainId, client, escrow, store } = parameters
+  const request = getChallengePaymentFields(challenge)
+  const expectedOperator = parameters.expectedOperator ?? zeroAddress
+  const additionalDeposit = uint96(BigInt(payload.additionalDeposit))
+  assertDescriptor(payload)
+  const channelId = ChannelStore.normalizeChannelId(payload.channelId)
+  validateChannelDescriptor(
+    payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    request.recipient,
+    request.currency,
+    expectedOperator,
+  )
+  const channel = await ChannelStore.loadPrecompileChannel({
+    descriptor: payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    store,
+    validateDescriptor: true,
+  })
+  const transaction = Chain.validateTopUpCredentialTransaction({
+    additionalDeposit,
+    challengeExpires: challenge.expires,
+    chainId,
+    descriptor: channel.descriptor,
+    escrowContract: escrow,
+    expectedChannelId: channelId,
+    expectedCurrency: request.currency,
+    feePayer: parameters.feePayer,
+    feePayerPolicy: parameters.feePayerPolicy,
+    serializedTransaction: payload.transaction,
+  })
+  validateChannelState(await Chain.getChannelState(client, channelId, escrow))
+  await Chain.simulateCredentialTransaction({
+    client,
+    feePayer: parameters.feePayer,
+    transaction: transaction.transaction,
+  })
+}
+
+async function validateVoucherCredential(
+  parameters: ValidateCredentialPayloadParameters,
+  payload: Extract<SessionCredentialPayload, { action: 'voucher' }>,
+) {
+  const {
+    challenge,
+    chainId,
+    client,
+    credentialSource,
+    escrow,
+    minVoucherDelta,
+    store,
+    channelStateTtl,
+    lastOnChainVerified,
+  } = parameters
+  const request = getChallengePaymentFields(challenge)
+  const expectedOperator = parameters.expectedOperator ?? zeroAddress
+  const channelId = ChannelStore.normalizeChannelId(payload.channelId)
+  const voucher = Voucher.parseVoucherFromPayload(
+    channelId,
+    payload.cumulativeAmount,
+    payload.signature,
+  )
+  assertDescriptor(payload)
+  validateChannelDescriptor(
+    payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    request.recipient,
+    request.currency,
+    expectedOperator,
+  )
+  const channel = await ChannelStore.loadPrecompileChannel({
+    descriptor: payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    store,
+    validateDescriptor: true,
+  })
+  assertCredentialSourceCanSpend({ chainId, channel, source: credentialSource })
+  if (channel.finalized) throw new ChannelClosedError({ reason: 'channel is finalized' })
+  const channelState = await resolveVoucherChannelState({
+    channel,
+    channelId,
+    channelStateTtl,
+    client,
+    escrow,
+    lastOnChainVerified,
+  })
+  await ChannelStore.validateVoucher({
+    channel,
+    channelState,
+    methodDetails: { chainId, escrowContract: escrow },
+    minVoucherDelta,
+    voucher,
+  })
+}
+
+async function resolveVoucherChannelState(parameters: {
+  channel: ChannelStore.State
+  channelId: Hex
+  channelStateTtl: number
+  client: Chain.TransactionClient
+  escrow: Address
+  lastOnChainVerified: Map<Hex, number>
+}): Promise<Chain.ChannelState> {
+  const { channel, channelId, channelStateTtl, client, escrow, lastOnChainVerified } = parameters
+  const isStale = Date.now() - (lastOnChainVerified.get(channelId) ?? 0) > channelStateTtl
+  const state = isStale ? await Chain.getChannelState(client, channelId, escrow) : undefined
+  if (state) lastOnChainVerified.set(channelId, Date.now())
+  return {
+    deposit: state?.deposit ?? uint96(channel.deposit),
+    settled: state?.settled ?? uint96(channel.settledOnChain),
+    closeRequestedAt: state?.closeRequestedAt ?? Number(channel.closeRequestedAt),
+  }
+}
+
+async function validateCloseCredential(
+  parameters: ValidateCredentialPayloadParameters,
+  payload: Extract<SessionCredentialPayload, { action: 'close' }>,
+) {
+  const { challenge, chainId, client, escrow, store } = parameters
+  const request = getChallengePaymentFields(challenge)
+  const expectedOperator = parameters.expectedOperator ?? zeroAddress
+  const cumulativeAmount = uint96(BigInt(payload.cumulativeAmount))
+  const channelId = ChannelStore.normalizeChannelId(payload.channelId)
+  assertDescriptor(payload)
+  validateChannelDescriptor(
+    payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    request.recipient,
+    request.currency,
+    expectedOperator,
+  )
+  const channel = await ChannelStore.loadPrecompileChannel({
+    descriptor: payload.descriptor,
+    channelId,
+    chainId,
+    escrow,
+    store,
+  })
+  if (channel.finalized) throw new ChannelClosedError({ reason: 'channel is already finalized' })
+  const state = await Chain.getChannelState(client, channelId, escrow)
+  if (state.closeRequestedAt !== 0)
+    throw new ChannelClosedError({ reason: 'channel has a pending close request' })
+  if (state.deposit === 0n && (cumulativeAmount !== 0n || channel.spent !== 0n))
+    throw new ChannelClosedError({ reason: 'channel deposit is zero (settled)' })
+  if (cumulativeAmount < channel.spent)
+    throw new VerificationFailedError({
+      reason: `close voucher amount must be >= ${channel.spent} (spent)`,
+    })
+  if (cumulativeAmount < state.settled)
+    throw new VerificationFailedError({
+      reason: `close voucher amount must be >= ${state.settled} (on-chain settled)`,
+    })
+  const valid = await Voucher.verifyVoucher(
+    escrow,
+    chainId,
+    { channelId, cumulativeAmount, signature: payload.signature },
+    channel.authorizedSigner,
+  )
+  if (!valid) throw new InvalidSignatureError({ reason: 'invalid voucher signature' })
+  const captureAmount = uint96(channel.spent > state.settled ? channel.spent : state.settled)
+  if (captureAmount > state.deposit)
+    throw new AmountExceedsDepositError({ reason: 'close capture amount exceeds on-chain deposit' })
+  const account = parameters.account ?? getClientAccount(client)
+  assertSettlementSender({
+    operation: 'close',
+    channelId,
+    operator: channel.operator,
+    payee: channel.payee,
+    sender: account?.address,
+  })
+}
+
+/** Broadcasts a validated session credential payload and applies its state transition. */
+export async function broadcastCredentialPayload(
+  context: BroadcastCredentialPayloadParameters,
 ): Promise<SessionReceipt> {
-  const receipt = await verifyCredentialAction(context)
+  const receipt = await broadcastCredentialAction(context)
   if (refreshOnChainVerificationCache[context.payload.action])
     context.lastOnChainVerified.set(receipt.channelId, Date.now())
   return receipt
 }
 
-function verifyCredentialAction(
+/** @deprecated Use {@link broadcastCredentialPayload}. */
+export async function verifyCredentialPayload(
   context: VerifyCredentialPayloadParameters,
+): Promise<SessionReceipt> {
+  return broadcastCredentialPayload(context)
+}
+
+function broadcastCredentialAction(
+  context: BroadcastCredentialPayloadParameters,
 ): Promise<SessionReceipt> {
   const { payload } = context
   switch (payload.action) {
@@ -405,9 +717,9 @@ function verifyCredentialAction(
 }
 
 function actionContext<action extends SessionCredentialPayload['action']>(
-  context: VerifyCredentialPayloadParameters,
+  context: BroadcastCredentialPayloadParameters,
   payload: Extract<SessionCredentialPayload, { action: action }>,
-): VerifyCredentialActionParameters<action> {
+): BroadcastCredentialActionParameters<action> {
   return { ...context, payload }
 }
 
@@ -597,14 +909,14 @@ async function handleVoucherCredential(
   })
   assertCredentialSourceCanSpend({ chainId, channel, source: credentialSource })
   if (channel.finalized) throw new ChannelClosedError({ reason: 'channel is finalized' })
-  const isStale = Date.now() - (lastOnChainVerified.get(channelId) ?? 0) > channelStateTtl
-  const state = isStale ? await Chain.getChannelState(client, channelId, escrow) : undefined
-  if (state) lastOnChainVerified.set(channelId, Date.now())
-  const channelState = {
-    deposit: state?.deposit ?? uint96(channel.deposit),
-    settled: state?.settled ?? uint96(channel.settledOnChain),
-    closeRequestedAt: state?.closeRequestedAt ?? Number(channel.closeRequestedAt),
-  }
+  const channelState = await resolveVoucherChannelState({
+    channel,
+    channelId,
+    channelStateTtl,
+    client,
+    escrow,
+    lastOnChainVerified,
+  })
   if (channelState.closeRequestedAt !== 0) {
     await store.updateChannel(channelId, (current) =>
       current
