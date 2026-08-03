@@ -12,6 +12,7 @@ import * as Transport from '../../../server/Transport.js'
 import type { SessionReceipt } from '../../session/precompile/Protocol.js'
 import { requireSessionCredentialContext } from '../../session/precompile/Protocol.js'
 import * as ChannelStore from '../../session/server/ChannelStore.js'
+import type { SettleChargedSessionChannel } from '../../session/server/Settlement.js'
 import * as Sse_core from '../../session/server/Sse.js'
 import { captureRequestBodyProbe, shouldChargePlainResponse } from './request-body.js'
 
@@ -48,7 +49,12 @@ function hasPrepaidSessionTick(receipt: SessionReceipt): boolean {
  * - Auto-detection of upstream SSE responses
  * - Fallback to standard HTTP receipt handling for plain Response
  */
-export function sse(options: sse.Options & { store: ChannelStore.ChannelStore }): Sse {
+export function sse(
+  options: sse.Options & {
+    settleCharged?: SettleChargedSessionChannel | undefined
+    store: ChannelStore.ChannelStore
+  },
+): Sse {
   const { pollingInterval, poll } = options
 
   // When `poll` is true, strip `waitForUpdate` so the SSE charge loop
@@ -117,6 +123,7 @@ export function sse(options: sse.Options & { store: ChannelStore.ChannelStore })
           tickCost,
           pollIntervalMs: pollingInterval,
           generate,
+          onChargeCommitted: options.settleCharged,
           prepaidUnits: hasPrepaidSessionTick(receipt as SessionReceipt) ? 1 : 0,
           signal: input.signal,
         })
@@ -174,20 +181,25 @@ export function sse(options: sse.Options & { store: ChannelStore.ChannelStore })
         response: response as Response,
         challengeId: verifiedChallengeId,
       })
+      const chargePlainResponse = async () => {
+        const result = await ChannelStore.deductFromChannel(store, channelId, tickCost)
+        if (result.ok) await options.settleCharged?.(result.channel)
+        return result
+      }
 
       // Non-SSE response (e.g. upstream returned JSON instead of event-stream).
       // Need to deduct tickCost so request isn't free.
       // For null-body statuses, the request shape determines whether the
       // response is management (no charge) or plain content (charge one tick).
       if (isNullBodyStatus(chargedResponse.status)) {
-        void ChannelStore.deductFromChannel(store, channelId, tickCost)
+        void chargePlainResponse()
         return chargedResponse
       }
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           // deduction completes before consumer reads
-          const result = await ChannelStore.deductFromChannel(store, channelId, tickCost)
+          const result = await chargePlainResponse()
           if (!result.ok) {
             controller.error(
               new Errors.InsufficientBalanceError({

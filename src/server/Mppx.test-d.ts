@@ -99,6 +99,29 @@ const secretKey = 'test-secret-key-test-secret-key-32'
 const realm = 'api.example.com'
 
 describe('Mppx type tests', () => {
+  test('method handlers expose method extensions', () => {
+    const sessionMethod = tempo.session({
+      amount: '1',
+      currency: '0x0000000000000000000000000000000000000001',
+      decimals: 6,
+      getClient: () => null as never,
+      recipient: '0x0000000000000000000000000000000000000002',
+      unitType: 'token',
+    })
+    const mppx = Mppx.create({ methods: [sessionMethod], realm, secretKey })
+
+    expectTypeOf(mppx.session.settleScheduled).toBeFunction()
+    expectTypeOf(mppx.session.serveWebSocket).toBeFunction()
+    type Options = Parameters<typeof mppx.session.serveWebSocket>[0]
+    expectTypeOf<Options>().toHaveProperty('route')
+    expectTypeOf<Options>().not.toHaveProperty('store')
+    expectTypeOf<Options>().not.toHaveProperty('onChargeCommitted')
+    expectTypeOf<Options>().not.toHaveProperty('settleScheduled')
+    type LowLevelOptions = Parameters<typeof tempo.Ws.serve>[0]
+    expectTypeOf<LowLevelOptions>().toHaveProperty('onChargeCommitted')
+    expectTypeOf<LowLevelOptions>().toHaveProperty('settleScheduled')
+  })
+
   test('compose exists on the instance and returns a handler', () => {
     const mppx = Mppx.create({ methods: [alphaMethod, betaMethod], realm, secretKey })
 
