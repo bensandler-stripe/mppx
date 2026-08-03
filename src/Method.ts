@@ -2,7 +2,7 @@ import type * as Challenge from './Challenge.js'
 import * as Credential from './Credential.js'
 import * as Errors from './Errors.js'
 import * as Expires from './Expires.js'
-import type { ExactPartial, LooseOmit, MaybePromise } from './internal/types.js'
+import type { DeepReadonly, ExactPartial, LooseOmit, MaybePromise } from './internal/types.js'
 import type * as Receipt from './Receipt.js'
 import type * as Html from './server/internal/html/config.js'
 import type * as Transport from './server/Transport.js'
@@ -194,27 +194,49 @@ export type Server<
   transportOverride = undefined,
   extensions extends object = {},
   alias extends string | undefined = string | undefined,
-> = method & {
-  alias?: alias | undefined
-  authorize?: AuthorizeFn<method> | undefined
-  defaults?: defaults | undefined
-  extensions?: extensions | undefined
-  html?: Html.Options | undefined
-  preflight?: PreflightFn<method> | undefined
-  request?: RequestFn<method> | undefined
-  respond?: RespondFn<method> | undefined
-  broadcast?: BroadcastFn<method> | undefined
-  stableBinding?: StableBindingFn<method> | undefined
-  transport?: transportOverride | undefined
-  validate?: ValidateFn<method> | undefined
-  /**
-   * @deprecated Use `validate` for the non-mutating pre-check and `broadcast`
-   * for settlement. `verify` combines both operations and may consume payment
-   * state, so it cannot support a safe pre-check endpoint.
-   */
-  verify: VerifyFn<method>
-}
+> = method &
+  ComposableHooks<method> & {
+    alias?: alias | undefined
+    authorize?: AuthorizeFn<method> | undefined
+    defaults?: defaults | undefined
+    extensions?: extensions | undefined
+    html?: Html.Options | undefined
+    preflight?: PreflightFn<method> | undefined
+    request?: RequestFn<method> | undefined
+    respond?: RespondFn<method> | undefined
+    broadcast?: BroadcastFn<method> | undefined
+    stableBinding?: StableBindingFn<method> | undefined
+    transport?: transportOverride | undefined
+    validate?: ValidateFn<method> | undefined
+    /**
+     * @deprecated Use `validate` for the non-mutating pre-check and `broadcast`
+     * for settlement. `verify` combines both operations and may consume payment
+     * state, so it cannot support a safe pre-check endpoint.
+     */
+    verify: VerifyFn<method>
+  }
 export type AnyServer = Server<any, any, any, any, any>
+
+/**
+ * Decides whether a configured method offer is available for an HTTP request.
+ *
+ * Called once per configured offer during composition. The payment request is
+ * schema-normalized and deeply immutable. `input` is cloned so its body can be
+ * safely inspected unless the upstream body was already consumed or locked, in
+ * which case the clone preserves request metadata without a body. Returning
+ * `false` removes only this method's offer. Successfully matched credential
+ * dispatch does not invoke this hook.
+ */
+export type CanOfferFn<method extends Method> = (parameters: {
+  input: globalThis.Request
+  request: DeepReadonly<z.output<method['schema']['request']>>
+}) => MaybePromise<boolean>
+
+/** Hooks supported by every composable server method constructor. */
+export type ComposableHooks<method extends Method> = {
+  /** Decides whether this method's configured offer is available for an HTTP request. */
+  canOffer?: CanOfferFn<method> | undefined
+}
 
 /** Credential creation function for a single method. */
 export type CreateCredentialFn<method extends Method, context = unknown> = (
@@ -511,6 +533,7 @@ export function toServer<
   const {
     alias,
     authorize,
+    canOffer,
     defaults,
     extensions,
     html,
@@ -537,6 +560,7 @@ export function toServer<
     ...method,
     alias,
     authorize,
+    canOffer,
     defaults,
     extensions,
     html,
@@ -560,7 +584,7 @@ export declare namespace toServer {
     transportOverride extends Transport.AnyTransport | undefined = undefined,
     extensions extends object = {},
     alias extends string | undefined = undefined,
-  > = {
+  > = ComposableHooks<method> & {
     alias?: alias | undefined
     authorize?: AuthorizeFn<method> | undefined
     defaults?: defaults | undefined
@@ -572,20 +596,20 @@ export declare namespace toServer {
     stableBinding?: StableBindingFn<method> | undefined
     transport?: transportOverride | Transport.AnyTransport | undefined
   } & (
-    | {
-        broadcast: BroadcastFn<method>
-        validate?: ValidateFn<method> | undefined
-        verify?: undefined
-      }
-    | {
-        broadcast?: undefined
-        validate?: undefined
-        /**
-         * @deprecated Use `validate` and `broadcast` for new methods. This
-         * combined hook may mutate payment state and cannot power a safe
-         * validation-only endpoint.
-         */
-        verify: VerifyFn<method>
-      }
-  )
+      | {
+          broadcast: BroadcastFn<method>
+          validate?: ValidateFn<method> | undefined
+          verify?: undefined
+        }
+      | {
+          broadcast?: undefined
+          validate?: undefined
+          /**
+           * @deprecated Use `validate` and `broadcast` for new methods. This
+           * combined hook may mutate payment state and cannot power a safe
+           * validation-only endpoint.
+           */
+          verify: VerifyFn<method>
+        }
+    )
 }

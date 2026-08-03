@@ -1,5 +1,5 @@
 import { Method, z } from 'mppx'
-import { Mppx, tempo } from 'mppx/server'
+import { Mppx, tempo, Transport } from 'mppx/server'
 import { assertType, describe, expectTypeOf, test } from 'vp/test'
 
 const mockChargeA = Method.from({
@@ -156,6 +156,87 @@ describe('Mppx type tests', () => {
     // Should compile — string key entries
     const handler = mppx.compose(['alpha/charge', opts], ['beta/charge', opts])
     expectTypeOf(handler).toBeFunction()
+  })
+
+  test('selectOffers exposes typed methods, normalized requests, and the HTTP request', () => {
+    Mppx.create({
+      methods: [alphaMethod, betaMethod],
+      realm,
+      secretKey,
+      selectOffers(offers, { request }) {
+        expectTypeOf(request).toEqualTypeOf<Request>()
+        expectTypeOf(offers[0]!.key).toEqualTypeOf<'alpha/charge' | 'beta/charge'>()
+        expectTypeOf(offers[0]!.method.name).toEqualTypeOf<'alpha' | 'beta'>()
+        expectTypeOf(offers[0]!.method.intent).toEqualTypeOf<'charge'>()
+        expectTypeOf(offers[0]!.request.amount).toEqualTypeOf<string>()
+        return offers.filter((offer) => offer.method.name !== 'beta')
+      },
+    })
+  })
+
+  test('method canOffer receives its normalized payment request and HTTP input', () => {
+    Method.toServer(mockChargeA, {
+      canOffer({ input, request }) {
+        expectTypeOf(input).toEqualTypeOf<Request>()
+        expectTypeOf(request.amount).toEqualTypeOf<string>()
+        expectTypeOf(request.currency).toEqualTypeOf<string>()
+        expectTypeOf(request.decimals).toEqualTypeOf<number>()
+        expectTypeOf(request.recipient).toEqualTypeOf<string>()
+        return true
+      },
+      async verify() {
+        return {
+          method: 'alpha',
+          reference: 'tx',
+          status: 'success' as const,
+          timestamp: new Date().toISOString(),
+        }
+      },
+    })
+  })
+
+  test('offer selection data is deeply readonly', () => {
+    Mppx.create({
+      methods: [tip1034SessionMethod, alternateSessionMethod],
+      realm,
+      secretKey,
+      selectOffers(offers) {
+        expectTypeOf(offers[0]!.method.alias).toEqualTypeOf<undefined | 'alternateSession'>()
+        // @ts-expect-error offer method descriptors are readonly.
+        offers[0]!.method.name = 'changed'
+        // @ts-expect-error normalized offer requests are deeply readonly.
+        offers[0]!.request.methodDetails.sessionProtocol = 'changed'
+        expectTypeOf(offers[0]!.method).not.toHaveProperty('verify')
+        return offers
+      },
+    })
+
+    Method.toServer(mockSession, {
+      canOffer({ request }) {
+        // @ts-expect-error canOffer requests are deeply readonly.
+        request.methodDetails.sessionProtocol = 'changed'
+        return true
+      },
+      async verify() {
+        return {
+          method: 'tempo',
+          reference: 'tx',
+          status: 'success' as const,
+          timestamp: new Date().toISOString(),
+        }
+      },
+    })
+  })
+
+  test('selectOffers is only available for HTTP transport', () => {
+    Mppx.create({
+      methods: [alphaMethod],
+      realm,
+      secretKey,
+      transport: Transport.mcp(),
+      // @ts-expect-error selectOffers applies to composed HTTP offers only.
+      selectOffers: (offers) => offers,
+    })
   })
 
   test('nested handlers are accessible', () => {

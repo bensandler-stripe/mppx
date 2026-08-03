@@ -1967,8 +1967,481 @@ describe('compose', () => {
     expect(wwwAuth).toContain('method="beta"')
   })
 
-  test('retains only explicitly configured offers as composed discovery metadata', () => {
-    const mppx = Mppx.create({ methods: [alphaMethod, betaMethod], realm, secretKey })
+  test('selectOffers filters by method, configured request, and incoming request', async () => {
+    const challenged: string[] = []
+    const input = new Request('https://example.com/resource?cards=disabled', {
+      body: 'request body',
+      method: 'POST',
+    })
+    const mppx = Mppx.create({
+      methods: [alphaMethod, betaMethod],
+      realm,
+      secretKey,
+      async selectOffers(offers, { request }) {
+        expect(request).not.toBe(input)
+        expect(await request.text()).toBe('request body')
+        expect(offers).toMatchObject([
+          {
+            key: 'alpha/charge',
+            method: { intent: 'charge', name: 'alpha' },
+            request: { amount: challengeOpts.amount },
+          },
+          {
+            key: 'beta/charge',
+            method: { intent: 'charge', name: 'beta' },
+            request: { amount: '50' },
+          },
+        ])
+
+        if (new URL(request.url).searchParams.get('cards') === 'disabled')
+          return offers.filter(
+            (offer) => offer.method.name !== 'beta' || BigInt(offer.request.amount) >= 100n,
+          )
+        return offers
+      },
+    })
+    mppx.onChallengeCreated(({ method }) => {
+      challenged.push(method.name)
+    })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [betaMethod, { ...challengeOpts, amount: '50' }],
+    )(input)
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
+    expect(challenged).toEqual(['alpha'])
+    expect(input.bodyUsed).toBe(false)
+  })
+
+  test('offer selectors receive deeply immutable method and request snapshots', async () => {
+    const guardedSession = Method.toServer(mockSession, {
+      canOffer({ request }) {
+        expect(Object.isFrozen(request)).toBe(true)
+        expect(Object.isFrozen(request.methodDetails)).toBe(true)
+        expect(Reflect.set(request.methodDetails, 'sessionProtocol', 'changed')).toBe(false)
+        return true
+      },
+      async verify() {
+        return mockReceipt('v2')
+      },
+    })
+    const mppx = Mppx.create({
+      methods: [guardedSession],
+      realm,
+      secretKey,
+      selectOffers(offers) {
+        const offer = offers[0]!
+        expect(Object.isFrozen(offers)).toBe(true)
+        expect(Object.isFrozen(offer)).toBe(true)
+        expect(Object.isFrozen(offer.method)).toBe(true)
+        expect(Object.keys(offer.method)).toEqual(['intent', 'name'])
+        expect(Object.isFrozen(offer.request)).toBe(true)
+        expect(Object.isFrozen(offer.request.methodDetails)).toBe(true)
+        expect(Reflect.set(offer.method, 'name', 'changed')).toBe(false)
+        expect(Reflect.set(offer.request.methodDetails, 'sessionProtocol', 'changed')).toBe(false)
+        return offers
+      },
+    })
+    const handler = mppx.compose([guardedSession, sessionChallengeOpts])
+
+    for (let call = 0; call < 2; call++) {
+      const result = await handler(new Request('https://example.com/resource'))
+      expect(result.status).toBe(402)
+      if (result.status !== 402) throw new Error()
+      const challenge = Challenge.fromResponse(result.challenge)
+      expect(challenge.method).toBe('tempo')
+      expect(challenge.request.methodDetails).toEqual({ sessionProtocol: 'v2' })
+    }
+  })
+
+  test.each(['consumed', 'locked'] as const)(
+    'offer hooks preserve request metadata when the upstream body is $state',
+    async (state) => {
+      const hookInputs: Request[] = []
+      const guardedBeta = Method.toServer(mockChargeB, {
+        async canOffer({ input }) {
+          hookInputs.push(input)
+          expect(await input.text()).toBe('')
+          return true
+        },
+        async verify() {
+          return mockReceipt('beta')
+        },
+      })
+      const input = new Request('https://example.com/resource?source=upstream', {
+        body: 'request body',
+        headers: { 'X-Request-Id': 'request-1' },
+        method: 'POST',
+      })
+      const reader = state === 'locked' ? input.body!.getReader() : undefined
+      if (state === 'consumed') await input.text()
+      const mppx = Mppx.create({
+        methods: [guardedBeta],
+        realm,
+        secretKey,
+        async selectOffers(offers, { request }) {
+          hookInputs.push(request)
+          expect(await request.text()).toBe('')
+          return offers
+        },
+      })
+
+      try {
+        const result = await mppx.compose([guardedBeta, challengeOpts])(input)
+        expect(result.status).toBe(402)
+      } finally {
+        reader?.releaseLock()
+      }
+
+      expect(hookInputs).toHaveLength(2)
+      for (const hookInput of hookInputs) {
+        expect(hookInput).not.toBe(input)
+        expect(hookInput.method).toBe('POST')
+        expect(hookInput.headers.get('X-Request-Id')).toBe('request-1')
+        expect(new URL(hookInput.url).searchParams.get('source')).toBe('upstream')
+      }
+    },
+  )
+
+  test('method canOffer runs before selectOffers with offer and upstream request context', async () => {
+    const calls: string[] = []
+    const guardedBeta = Method.toServer(mockChargeB, {
+      async canOffer({ input, request }) {
+        calls.push('canOffer')
+        expect(input).not.toBe(upstreamRequest)
+        expect(await input.text()).toBe('request body')
+        expect(request).toEqual({
+          amount: '50',
+          currency: challengeOpts.currency,
+          decimals: challengeOpts.decimals,
+          recipient: challengeOpts.recipient,
+        })
+        return BigInt(request.amount) >= 100n
+      },
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const upstreamRequest = new Request('https://example.com/resource', {
+      body: 'request body',
+      method: 'POST',
+    })
+    const mppx = Mppx.create({
+      methods: [alphaMethod, guardedBeta],
+      realm,
+      secretKey,
+      selectOffers(offers) {
+        calls.push('selectOffers')
+        expect(offers.map((offer) => offer.method.name)).toEqual(['alpha'])
+        return offers
+      },
+    })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [guardedBeta, { ...challengeOpts, amount: '50' }],
+    )(upstreamRequest)
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
+    expect(calls).toEqual(['canOffer', 'selectOffers'])
+    expect(upstreamRequest.bodyUsed).toBe(false)
+  })
+
+  test('method canOffer evaluates each configured offer without selectOffers', async () => {
+    const amounts: string[] = []
+    const guardedBeta = Method.toServer(mockChargeB, {
+      canOffer({ request }) {
+        amounts.push(request.amount)
+        return BigInt(request.amount) >= 100n
+      },
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const mppx = Mppx.create({ methods: [guardedBeta], realm, secretKey })
+
+    const handler = mppx.compose(
+      [guardedBeta, { ...challengeOpts, amount: '50' }],
+      [guardedBeta, { ...challengeOpts, amount: '100' }],
+    )
+    expect(handler._internal?.offers).toHaveLength(2)
+
+    const result = await handler(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(amounts).toEqual(['50', '100'])
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.request.amount),
+    ).toEqual(['100'])
+  })
+
+  test('static compose applies method canOffer', async () => {
+    const guardedBeta = Method.toServer(mockChargeB, {
+      canOffer: () => false,
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const mppx = Mppx.create({ methods: [alphaMethod, guardedBeta], realm, secretKey })
+
+    const result = await Mppx.compose(
+      mppx.alpha.charge(challengeOpts),
+      mppx.beta.charge(challengeOpts),
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
+  })
+
+  test('method canOffer does not gate a direct method handler', async () => {
+    const canOffer = vi.fn(() => false)
+    const guardedAlpha = Method.toServer(mockChargeA, {
+      canOffer,
+      async verify() {
+        return mockReceipt('alpha')
+      },
+    })
+    const mppx = Mppx.create({ methods: [guardedAlpha], realm, secretKey })
+
+    const result = await mppx.alpha.charge(challengeOpts)(
+      new Request('https://example.com/resource'),
+    )
+
+    expect(result.status).toBe(402)
+    expect(canOffer).not.toHaveBeenCalled()
+  })
+
+  test('method canOffer filters before preflight and authorize hooks', async () => {
+    const authorize = vi.fn()
+    const preflight = vi.fn()
+    const guardedBeta = Method.toServer(mockChargeB, {
+      async authorize() {
+        authorize()
+        return undefined
+      },
+      canOffer: () => false,
+      async preflight() {
+        preflight()
+        return undefined
+      },
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const mppx = Mppx.create({ methods: [alphaMethod, guardedBeta], realm, secretKey })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [guardedBeta, challengeOpts],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    expect(preflight).not.toHaveBeenCalled()
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    {
+      canOffer: () => 'yes',
+      expected: 'canOffer() must return a boolean',
+      name: 'non-boolean result',
+    },
+    {
+      canOffer: () => false,
+      expected: 'No payment offers are available for this request',
+      name: 'no eligible offers',
+    },
+  ])('rejects invalid method offer availability: $name', async ({ canOffer, expected }) => {
+    const guardedAlpha = Method.toServer(mockChargeA, {
+      canOffer: canOffer as never,
+      async verify() {
+        return mockReceipt('alpha')
+      },
+    })
+    const mppx = Mppx.create({ methods: [guardedAlpha], realm, secretKey })
+
+    await expect(
+      mppx.compose([guardedAlpha, challengeOpts])(new Request('https://example.com/resource')),
+    ).rejects.toThrow(expected)
+  })
+
+  test('propagates method canOffer rejections', async () => {
+    const error = new Error('method offer selection failed')
+    const guardedAlpha = Method.toServer(mockChargeA, {
+      async canOffer() {
+        throw error
+      },
+      async verify() {
+        return mockReceipt('alpha')
+      },
+    })
+    const mppx = Mppx.create({ methods: [guardedAlpha], realm, secretKey })
+
+    await expect(
+      mppx.compose([guardedAlpha, challengeOpts])(new Request('https://example.com/resource')),
+    ).rejects.toBe(error)
+  })
+
+  test('method canOffer does not prevent redemption of an issued offer', async () => {
+    const canOffer = vi.fn(() => false)
+    const guardedBeta = Method.toServer(mockChargeB, {
+      canOffer,
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const mppx = Mppx.create({ methods: [guardedBeta], realm, secretKey })
+    const challenge = await mppx.challenge.beta.charge(challengeOpts)
+    const credential = Credential.from({ challenge, payload: { token: 'valid' } })
+
+    const result = await mppx.compose([guardedBeta, challengeOpts])(
+      new Request('https://example.com/resource', {
+        headers: { Authorization: Credential.serialize(credential) },
+      }),
+    )
+
+    expect(result.status).toBe(200)
+    expect(canOffer).not.toHaveBeenCalled()
+  })
+
+  test('selectOffers does not prevent redemption of a previously issued offer', async () => {
+    let selectionCount = 0
+    const mppx = Mppx.create({
+      methods: [alphaMethod, betaMethod],
+      realm,
+      secretKey,
+      selectOffers(offers, { request }) {
+        selectionCount++
+        return request.headers.has('X-Hide-Beta')
+          ? offers.filter((offer) => offer.method.name !== 'beta')
+          : offers
+      },
+    })
+    const handler = mppx.compose([alphaMethod, challengeOpts], [betaMethod, challengeOpts])
+    const challengeResult = await handler(new Request('https://example.com/resource'))
+    expect(challengeResult.status).toBe(402)
+    if (challengeResult.status !== 402) throw new Error()
+    const betaChallenge = Challenge.fromResponseList(challengeResult.challenge).find(
+      (challenge) => challenge.method === 'beta',
+    )!
+    const credential = Credential.from({
+      challenge: betaChallenge,
+      payload: { token: 'valid' },
+    })
+
+    const result = await handler(
+      new Request('https://example.com/resource', {
+        headers: {
+          Authorization: Credential.serialize(credential),
+          'X-Hide-Beta': 'true',
+        },
+      }),
+    )
+
+    expect(result.status).toBe(200)
+    expect(selectionCount).toBe(1)
+  })
+
+  test.each(['malformed', 'unmatched'] as const)(
+    'applies selectOffers before rejecting a $kind payment credential',
+    async (kind) => {
+      let selectionCount = 0
+      const mppx = Mppx.create({
+        methods: [alphaMethod, betaMethod],
+        realm,
+        secretKey,
+        selectOffers(offers) {
+          selectionCount++
+          return offers.filter((offer) => offer.method.name === 'beta')
+        },
+      })
+      const authorization =
+        kind === 'malformed'
+          ? 'Payment invalid'
+          : Credential.serialize(
+              Credential.from({
+                challenge: {
+                  ...(await mppx.challenge.alpha.charge(challengeOpts)),
+                  method: 'unknown',
+                },
+                payload: { token: 'invalid' },
+              }),
+            )
+
+      const result = await mppx.compose(
+        [alphaMethod, challengeOpts],
+        [betaMethod, challengeOpts],
+      )(
+        new Request('https://example.com/resource', {
+          headers: { Authorization: authorization },
+        }),
+      )
+
+      expect(result.status).toBe(402)
+      if (result.status !== 402) throw new Error()
+      expect(Challenge.fromResponse(result.challenge).method).toBe('beta')
+      expect(selectionCount).toBe(1)
+    },
+  )
+
+  test.each([
+    {
+      expected: 'return an array',
+      name: 'non-array result',
+      select: () => null,
+    },
+    {
+      expected: 'select at least one offer',
+      name: 'empty selection',
+      select: (offers: readonly unknown[]) => offers.slice(0, 0),
+    },
+    {
+      expected: 'only offers from its input array',
+      name: 'copied offer',
+      select: (offers: readonly unknown[]) => [{ ...(offers[0] as object) }],
+    },
+    {
+      expected: 'preserve offer order',
+      name: 'duplicate offer',
+      select: (offers: readonly unknown[]) => [offers[0], offers[0]],
+    },
+    {
+      expected: 'preserve offer order',
+      name: 'reordered offers',
+      select: (offers: readonly unknown[]) => [offers[1], offers[0]],
+    },
+  ])('rejects invalid selectOffers result: $name', async ({ expected, select }) => {
+    const mppx = Mppx.create({
+      methods: [alphaMethod, betaMethod],
+      realm,
+      secretKey,
+      selectOffers: select as never,
+    })
+    const handler = mppx.compose([alphaMethod, challengeOpts], [betaMethod, challengeOpts])
+
+    await expect(handler(new Request('https://example.com/resource'))).rejects.toThrow(expected)
+  })
+
+  test('retains all configured offers as discovery metadata when selectOffers is dynamic', () => {
+    const mppx = Mppx.create({
+      methods: [alphaMethod, betaMethod],
+      realm,
+      secretKey,
+      selectOffers: (offers) => offers.slice(0, 1),
+    })
     const configured = mppx.compose([alphaMethod, challengeOpts], [betaMethod, challengeOpts])
 
     expect(configured._internal?.offers).toMatchObject([
@@ -1999,6 +2472,135 @@ describe('compose', () => {
       }) as const
     const composed = Mppx.compose(mppx.alpha.charge(challengeOpts), custom)
     expect(composed._internal?.offers).toMatchObject([{ intent: 'charge', name: 'alpha' }])
+  })
+
+  test('does not run preflight or authorize hooks for filtered offers', async () => {
+    const authorize = vi.fn()
+    const preflight = vi.fn()
+    const filteredMethod = Method.toServer(mockChargeB, {
+      async authorize() {
+        authorize()
+        return undefined
+      },
+      async preflight() {
+        preflight()
+        return undefined
+      },
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const mppx = Mppx.create({
+      methods: [alphaMethod, filteredMethod],
+      realm,
+      secretKey,
+      selectOffers: (offers) => offers.filter((offer) => offer.method.name !== 'beta'),
+    })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [filteredMethod, challengeOpts],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    expect(preflight).not.toHaveBeenCalled()
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  test('selectOffers distinguishes aliased methods that share a canonical key', async () => {
+    const mppx = Mppx.create({
+      methods: [tip1034SessionMethod, alternateSessionMethod],
+      realm,
+      secretKey,
+      selectOffers(offers) {
+        expect(offers.map((offer) => offer.key)).toEqual(['tempo/session', 'tempo/session'])
+        expect(offers.map((offer) => offer.method.alias)).toEqual([undefined, 'alternateSession'])
+        expect(offers.map((offer) => offer.request.methodDetails)).toEqual([
+          { sessionProtocol: 'v2' },
+          { sessionProtocol: 'alternate' },
+        ])
+        return offers.filter((offer) => offer.method.alias === 'alternateSession')
+      },
+    })
+
+    const result = await mppx.compose(
+      [mppx.tempo.session, sessionChallengeOpts],
+      [mppx.tempo.alternateSession, alternateSessionChallengeOpts],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(Challenge.fromResponse(result.challenge).request.methodDetails).toEqual({
+      sessionProtocol: 'alternate',
+    })
+  })
+
+  test('selectOffers receives schema-transformed request values', async () => {
+    const transformedCharge = Method.from({
+      name: 'transformed',
+      intent: 'charge',
+      schema: {
+        credential: {
+          payload: z.object({ token: z.string() }),
+        },
+        request: z.pipe(
+          z.object({
+            amount: z.string(),
+            currency: z.string(),
+            decimals: z.number(),
+            recipient: z.string(),
+          }),
+          z.transform(({ amount, currency, decimals, recipient }) => ({
+            amount: String(Number(amount) * 10 ** decimals),
+            currency,
+            methodDetails: { decimals },
+            recipient,
+          })),
+        ),
+      },
+    })
+    const transformedMethod = Method.toServer(transformedCharge, {
+      async verify() {
+        return mockReceipt('transformed')
+      },
+    })
+    const mppx = Mppx.create({
+      methods: [transformedMethod],
+      realm,
+      secretKey,
+      selectOffers(offers) {
+        expect(offers[0]?.request).toEqual({
+          amount: '125',
+          currency: challengeOpts.currency,
+          methodDetails: { decimals: 2 },
+          recipient: challengeOpts.recipient,
+        })
+        return offers
+      },
+    })
+
+    const result = await mppx.compose([
+      transformedMethod,
+      { ...challengeOpts, amount: '1.25', decimals: 2 },
+    ])(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+  })
+
+  test('propagates selectOffers rejections', async () => {
+    const error = new Error('offer selection failed')
+    const mppx = Mppx.create({
+      methods: [alphaMethod],
+      realm,
+      secretKey,
+      async selectOffers() {
+        throw error
+      },
+    })
+
+    await expect(
+      mppx.compose([alphaMethod, challengeOpts])(new Request('https://example.com/resource')),
+    ).rejects.toBe(error)
   })
 
   test('broadcasts duplicate tempo/session variants in compose order', async () => {
@@ -2088,6 +2690,44 @@ describe('compose', () => {
     expect(header).toBeTruthy()
     const paymentRequired = x402_Header.decodePaymentRequired(header!)
     expect(paymentRequired.accepts.map((accepted) => accepted.amount)).toEqual(['10000'])
+  })
+
+  test('selectOffers filters x402 challenge headers', async () => {
+    const mppx = Mppx.create({
+      methods: [alphaMethod, x402Method],
+      realm,
+      secretKey,
+      selectOffers: (offers) => offers.filter((offer) => offer.method.name !== 'evm'),
+    })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      ['evm/charge', { amount: '0.01' }],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
+    expect(result.challenge.headers.get(x402_Types.paymentRequiredHeader)).toBeNull()
+  })
+
+  test('method canOffer filters x402 challenge headers', async () => {
+    const guardedX402 = { ...x402Method, canOffer: () => false }
+    const mppx = Mppx.create({ methods: [alphaMethod, guardedX402], realm, secretKey })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [guardedX402, { amount: '0.01' }],
+    )(new Request('https://example.com/resource'))
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
+    expect(result.challenge.headers.get(x402_Types.paymentRequiredHeader)).toBeNull()
   })
 
   test('keeps pure x402 challenge headers when Payment auth challenges are present', async () => {
@@ -2199,6 +2839,55 @@ describe('compose', () => {
     const challenges = Challenge.fromResponseList(result.challenge)
     expect(challenges).toHaveLength(1)
     expect(challenges[0]?.method).toBe('beta')
+  })
+
+  test('applies selectOffers before Accept-Payment negotiation', async () => {
+    const mppx = Mppx.create({
+      methods: [alphaMethod, betaMethod],
+      realm,
+      secretKey,
+      selectOffers: (offers) => offers.filter((offer) => offer.method.name !== 'beta'),
+    })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [betaMethod, challengeOpts],
+    )(
+      new Request('https://example.com/resource', {
+        headers: { 'Accept-Payment': 'beta/charge' },
+      }),
+    )
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
+  })
+
+  test('applies method canOffer before Accept-Payment negotiation', async () => {
+    const guardedBeta = Method.toServer(mockChargeB, {
+      canOffer: () => false,
+      async verify() {
+        return mockReceipt('beta')
+      },
+    })
+    const mppx = Mppx.create({ methods: [alphaMethod, guardedBeta], realm, secretKey })
+
+    const result = await mppx.compose(
+      [alphaMethod, challengeOpts],
+      [guardedBeta, challengeOpts],
+    )(
+      new Request('https://example.com/resource', {
+        headers: { 'Accept-Payment': 'beta/charge' },
+      }),
+    )
+
+    expect(result.status).toBe(402)
+    if (result.status !== 402) throw new Error()
+    expect(
+      Challenge.fromResponseList(result.challenge).map((challenge) => challenge.method),
+    ).toEqual(['alpha'])
   })
 
   test('filters compose x402 challenge headers using Accept-Payment', async () => {
@@ -2749,6 +3438,64 @@ describe('compose', () => {
       expect(dataValues[0]!.config).toEqual({ providerA: true })
       expect(dataValues[1]!.label).toBe('beta')
       expect(dataValues[1]!.config).toEqual({ providerB: true })
+    })
+
+    test('selectOffers filters html payment options', async () => {
+      const mppx = Mppx.create({
+        methods: [alphaWithHtml, betaWithHtml],
+        realm,
+        secretKey,
+        selectOffers: (offers) => offers.filter((offer) => offer.method.name !== 'beta'),
+      })
+
+      const result = await mppx.compose(
+        [alphaWithHtml, challengeOpts],
+        [betaWithHtml, challengeOpts],
+      )(
+        new Request('https://example.com/resource', {
+          headers: { Accept: 'text/html' },
+        }),
+      )
+
+      expect(result.status).toBe(402)
+      if (result.status !== 402) throw new Error()
+      const body = await result.challenge.text()
+      expect(body).toContain('/alpha-bundle.js')
+      expect(body).not.toContain('/beta-bundle.js')
+      expect(body).not.toContain('role="tablist"')
+
+      const dataMatch = body.match(
+        /<script[^>]*id="__MPPX_DATA__"[^>]*type="application\/json"[^>]*>\s*([\s\S]*?)\s*<\/script>/s,
+      )
+      const dataMap = JSON.parse(dataMatch![1]!.replace(/\\u003c/g, '<'))
+      expect(Object.values(dataMap)).toMatchObject([{ label: 'alpha' }])
+    })
+
+    test('method canOffer filters html payment options', async () => {
+      const guardedBeta = Method.toServer(mockChargeB, {
+        canOffer: () => false,
+        html: htmlOptionsB,
+        async verify() {
+          return mockReceipt('beta')
+        },
+      })
+      const mppx = Mppx.create({ methods: [alphaWithHtml, guardedBeta], realm, secretKey })
+
+      const result = await mppx.compose(
+        [alphaWithHtml, challengeOpts],
+        [guardedBeta, challengeOpts],
+      )(
+        new Request('https://example.com/resource', {
+          headers: { Accept: 'text/html' },
+        }),
+      )
+
+      expect(result.status).toBe(402)
+      if (result.status !== 402) throw new Error()
+      const body = await result.challenge.text()
+      expect(body).toContain('/alpha-bundle.js')
+      expect(body).not.toContain('/beta-bundle.js')
+      expect(body).not.toContain('role="tablist"')
     })
 
     test('returns html without tabs when single method has html', async () => {
