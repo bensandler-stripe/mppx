@@ -5,6 +5,9 @@ import { playwright } from 'vp/test/browser-playwright'
 
 // Shared aliases used by both projects
 const alias = {
+  'mppx/attestation/tap': path.resolve(import.meta.dirname, 'src/tap'),
+  'mppx/attestation/web-bot-auth': path.resolve(import.meta.dirname, 'src/web-bot-auth'),
+  'mppx/attestation': path.resolve(import.meta.dirname, 'src/attestation'),
   'mppx/client': path.resolve(import.meta.dirname, 'src/client'),
   'mppx/discovery': path.resolve(import.meta.dirname, 'src/discovery'),
   'mppx/mcp/client': path.resolve(import.meta.dirname, 'src/mcp/client'),
