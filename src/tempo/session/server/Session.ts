@@ -482,6 +482,7 @@ export function session<const parameters extends session.Parameters>(
     session.Extensions
   >(Methods.session, {
     canOffer: parameters.canOffer,
+    onPaymentSuccess: parameters.onPaymentSuccess,
     defaults: deriveServerDefaults<parameters>({
       amount,
       currency,

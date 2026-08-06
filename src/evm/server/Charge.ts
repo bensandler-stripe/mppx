@@ -25,6 +25,7 @@ export function charge(parameters: charge.NativeConfig): Method.AnyServer {
 
   return Method.toServer<typeof Methods.charge, charge.Defaults, typeof transport>(Methods.charge, {
     canOffer: parameters.canOffer,
+    onPaymentSuccess: parameters.onPaymentSuccess,
     defaults: {
       chainId: config.chainId,
       currency: config.currency,

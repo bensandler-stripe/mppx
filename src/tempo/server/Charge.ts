@@ -361,6 +361,7 @@ export function charge<const parameters extends charge.Parameters>(
   type Defaults = charge.DeriveDefaults<parameters>
   const method = Method.toServer<typeof Methods.charge, Defaults>(Methods.charge, {
     canOffer: parameters.canOffer,
+    onPaymentSuccess: parameters.onPaymentSuccess,
     defaults: {
       amount,
       currency,

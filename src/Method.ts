@@ -233,9 +233,25 @@ export type CanOfferFn<method extends Method> = (parameters: {
 }) => MaybePromise<boolean>
 
 /** Hooks supported by every composable server method constructor. */
+/**
+ * Optional per-method hook invoked after a payment succeeds.
+ *
+ * Called after verification completes successfully. Use this for side-effects
+ * like recording the payment in an external system (e.g. creating a Stripe
+ * PaymentIntent for on-chain transactions). Routed through the server event
+ * dispatcher so errors are isolated and do not affect the response.
+ */
+export type OnPaymentSuccessFn<method extends Method> = (parameters: {
+  input?: globalThis.Request
+  receipt: DeepReadonly<Receipt.Receipt>
+  request: DeepReadonly<z.output<method['schema']['request']>>
+}) => MaybePromise<void>
+
 export type ComposableHooks<method extends Method> = {
   /** Decides whether this method's configured offer is available for an HTTP request. */
   canOffer?: CanOfferFn<method> | undefined
+  /** Invoked after a successful payment on this method. */
+  onPaymentSuccess?: OnPaymentSuccessFn<method> | undefined
 }
 
 /** Credential creation function for a single method. */

@@ -511,6 +511,17 @@ export function create<
 
   for (const mi of methods) {
     intentCount[mi.intent] = (intentCount[mi.intent] ?? 0) + 1
+    if (mi.onPaymentSuccess) {
+      serverEvents.on('payment.success', (async (ctx: PaymentSuccessContext) => {
+        if (ctx.method.name === mi.name && ctx.method.intent === mi.intent) {
+          await mi.onPaymentSuccess({
+            input: ctx.input,
+            receipt: ctx.receipt,
+            request: ctx.request,
+          })
+        }
+      }) as never)
+    }
   }
   assertNoReservedMppxKeys(methods as readonly Method.AnyServer[])
 
