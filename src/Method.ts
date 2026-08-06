@@ -237,9 +237,7 @@ export type CanOfferFn<method extends Method> = (parameters: {
  * Optional per-method hook invoked after a payment succeeds.
  *
  * Called after verification completes successfully. Use this for side-effects
- * like recording the payment in an external system (e.g. creating a Stripe
- * PaymentIntent for on-chain transactions). Routed through the server event
- * dispatcher so errors are isolated and do not affect the response.
+ * like recording the payment in an external system.
  */
 export type OnPaymentSuccessFn<method extends Method> = (parameters: {
   input?: globalThis.Request

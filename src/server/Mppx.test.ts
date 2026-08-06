@@ -1465,6 +1465,59 @@ describe('server events', () => {
     expect(events).toEqual(['success:tx-standalone:undefined:/standalone'])
   })
 
+  test('per-method onPaymentSuccess hook fires on successful payment', async () => {
+    const hookCalls: { receipt: string; amount: string }[] = []
+    const serverMethod = Method.toServer(eventCharge, {
+      onPaymentSuccess: async ({ receipt, request }) => {
+        hookCalls.push({ receipt: receipt.reference, amount: (request as any).amount })
+      },
+      async verify() {
+        return receipt('tx-hook')
+      },
+    })
+    const handler = Mppx.create({ methods: [serverMethod], realm, secretKey })
+
+    const first = await handler.charge(options())(new Request('https://example.com/resource'))
+    expect(first.status).toBe(402)
+    if (first.status !== 402) throw new Error()
+
+    await handler.verifyCredential(
+      Credential.from({
+        challenge: Challenge.fromResponse(first.challenge),
+        payload: { token: 'valid' },
+      }),
+      { request: options() },
+    )
+
+    expect(hookCalls).toEqual([{ receipt: 'tx-hook', amount: '1000' }])
+  })
+
+  test('per-method onPaymentSuccess hook errors do not propagate', async () => {
+    const serverMethod = Method.toServer(eventCharge, {
+      onPaymentSuccess: async () => {
+        throw new Error('hook failure')
+      },
+      async verify() {
+        return receipt('tx-error')
+      },
+    })
+    const handler = Mppx.create({ methods: [serverMethod], realm, secretKey })
+
+    const first = await handler.charge(options())(new Request('https://example.com/resource'))
+    expect(first.status).toBe(402)
+    if (first.status !== 402) throw new Error()
+
+    const result = await handler.verifyCredential(
+      Credential.from({
+        challenge: Challenge.fromResponse(first.challenge),
+        payload: { token: 'valid' },
+      }),
+      { request: options() },
+    )
+
+    expect(result.reference).toBe('tx-error')
+  })
+
   test('emits payment failure from standalone verifyCredential failures', async () => {
     const events: string[] = []
     const capturedRequest = {
