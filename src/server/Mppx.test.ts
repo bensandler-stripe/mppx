@@ -1541,6 +1541,131 @@ describe('server events', () => {
     expect(events).toEqual(['success:tx-standalone:undefined:/standalone'])
   })
 
+  test('per-method onPaymentSuccess hook fires on successful payment', async () => {
+    const calls: string[] = []
+    const serverMethod = Method.toServer(eventCharge, {
+      onPaymentSuccess: async ({ receipt }) => {
+        calls.push(receipt.reference)
+      },
+      async verify() {
+        return receipt('tx-hook')
+      },
+    })
+    const handler = Mppx.create({ methods: [serverMethod], realm, secretKey })
+
+    const challenge = await handler.charge(options())(new Request('https://example.com/resource'))
+    if (challenge.status !== 402) throw new Error()
+    await handler.verifyCredential(
+      Credential.from({
+        challenge: Challenge.fromResponse(challenge.challenge),
+        payload: { token: 'valid' },
+      }),
+      { request: options() },
+    )
+
+    expect(calls).toEqual(['tx-hook'])
+  })
+
+  test('onPaymentSuccess does not fire for a different method name', async () => {
+    const hookCalls: string[] = []
+
+    const methodWithHook = Method.toServer(eventCharge, {
+      onPaymentSuccess: async ({ receipt }) => {
+        hookCalls.push(receipt.reference)
+      },
+      async verify() {
+        return receipt('tx-a')
+      },
+    })
+    const otherName = Method.from({ name: 'other', intent: 'charge', schema: eventCharge.schema })
+    const methodWithoutHook = Method.toServer(otherName, {
+      async verify() {
+        return receipt('tx-b')
+      },
+    })
+
+    const handler = Mppx.create({ methods: [methodWithHook, methodWithoutHook], realm, secretKey })
+
+    // Pay the method WITHOUT the hook
+    const challenge = await handler.compose(['other/charge', options()])(
+      new Request('https://example.com'),
+    )
+    if (challenge.status !== 402) throw new Error()
+    await handler.verifyCredential(
+      Credential.from({
+        challenge: Challenge.fromResponse(challenge.challenge),
+        payload: { token: 'valid' },
+      }),
+      { request: options() },
+    )
+
+    expect(hookCalls).toEqual([])
+  })
+
+  test('onPaymentSuccess does not fire for a different intent', async () => {
+    const hookCalls: string[] = []
+
+    const chargeMethod = Method.toServer(eventCharge, {
+      onPaymentSuccess: async ({ receipt }) => {
+        hookCalls.push(receipt.reference)
+      },
+      async verify() {
+        return receipt('tx-charge')
+      },
+    })
+    const sessionSchema = Method.from({
+      name: 'mock',
+      intent: 'session',
+      schema: eventCharge.schema,
+    })
+    const sessionMethod = Method.toServer(sessionSchema, {
+      async verify() {
+        return receipt('tx-session')
+      },
+    })
+
+    const handler = Mppx.create({ methods: [chargeMethod, sessionMethod], realm, secretKey })
+
+    // Pay the session method - charge hook should NOT fire
+    const challenge = await handler.session(options())(new Request('https://example.com'))
+    if (challenge.status !== 402) throw new Error()
+    await handler.verifyCredential(
+      Credential.from({
+        challenge: Challenge.fromResponse(challenge.challenge),
+        payload: { token: 'valid' },
+      }),
+      { request: options() },
+    )
+
+    expect(hookCalls).toEqual([])
+  })
+
+  test('per-method onPaymentSuccess hook errors do not propagate', async () => {
+    const serverMethod = Method.toServer(eventCharge, {
+      onPaymentSuccess: async () => {
+        throw new Error('hook failure')
+      },
+      async verify() {
+        return receipt('tx-error')
+      },
+    })
+    const handler = Mppx.create({ methods: [serverMethod], realm, secretKey })
+
+    const first = await handler.charge(options())(new Request('https://example.com/resource'))
+    expect(first.status).toBe(402)
+    if (first.status !== 402) throw new Error()
+
+    const result = await handler.verifyCredential(
+      Credential.from({
+        challenge: Challenge.fromResponse(first.challenge),
+        payload: { token: 'valid' },
+      }),
+      { request: options() },
+    )
+
+    expect(result.reference).toBe('tx-error')
+  })
+
   test('emits payment failure from standalone verifyCredential failures', async () => {
     const events: string[] = []
     const capturedRequest = {

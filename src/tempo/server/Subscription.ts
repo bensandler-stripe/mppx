@@ -95,6 +95,7 @@ export function subscription<const parameters extends subscription.Parameters>(
     subscription.Extensions
   >(Methods.subscription, {
     canOffer: parameters.canOffer,
+    onPaymentSuccess: parameters.onPaymentSuccess,
     defaults: {
       amount,
       currency,
