@@ -1,24 +1,404 @@
+import * as EvmAssets from '../../evm/Assets.js'
+import { charge as evmCharge } from '../../evm/server/Charge.js'
+import type * as Method from '../../Method.js'
+import * as tempoDefaults from '../../tempo/internal/defaults.js'
+import { charge as tempoCharge } from '../../tempo/server/Charge.js'
+import { session as tempoSession } from '../../tempo/session/server/Session.js'
+import type { StripeClient } from '../internal/types.js'
 import { charge as charge_ } from './Charge.js'
+import { findOrCreateDepositAddress as _findOrCreateDepositAddress } from './internal/deposit-address.js'
+import { recordCryptoPayment } from './internal/record-payment.js'
+import { type ConnectConfig } from './internal/request.js'
+
+// --- Public types ---
+
+export declare namespace stripe {
+  type Network = 'tempo' | 'base' | 'solana'
+
+  type DepositAddress<N extends Network = Network> = string & {
+    readonly __brand: 'StripeDepositAddress'
+    readonly __network: N
+  }
+
+  // TODO: make networkId and livemode also accept dynamic resolvers (fetched from
+  // GET /v2/network/business_profiles/me which returns { id, livemode, ... }).
+  // This would allow `stripe.create({ secretKey })` with no other params.
+  type Parameters = {
+    client: StripeClient
+    networkId: string
+    livemode: boolean
+    connect?: ConnectConfig
+    depositAddresses?: Partial<Record<Network, string>> | ((network: Network) => Promise<string>)
+  }
+}
+
+// --- Internal types ---
+
+type CustomRailFactory = (address: string) => Method.AnyServer | readonly Method.AnyServer[]
+
+type ServerOf<N extends string, I extends string> = Omit<Method.AnyServer, 'name' | 'intent'> & {
+  name: N
+  intent: I
+}
+
+type TempoServer = ServerOf<'tempo', 'charge'>
+type TempoSessionServer = ServerOf<'tempo', 'session'>
+type SptServer = ServerOf<'stripe', 'charge'>
+type EvmServer = ServerOf<'evm', 'charge'>
+
+type BaseConfig = {
+  x402: NonNullable<Parameters<typeof evmCharge>[0]['x402']>
+} & Partial<Omit<Parameters<typeof evmCharge>[0], 'currency' | 'recipient' | 'x402'>>
+
+type CustomRailNetwork = Exclude<stripe.Network, 'tempo' | 'base'>
+
+type AdditionalConfig = {
+  base?: BaseConfig
+  tempo?: { session: Omit<tempoSession.Parameters, 'currency' | 'recipient'> }
+} & { [K in CustomRailNetwork]?: CustomRailFactory }
+
+type DefaultMethods = readonly [TempoServer, SptServer]
+
+type DefaultMethodsWithAdditional<C extends AdditionalConfig> = readonly [
+  TempoServer,
+  SptServer,
+  ...(C extends { base: object } ? [EvmServer] : []),
+  ...(C extends { tempo: { session: any } } ? [TempoSessionServer] : []),
+]
+
+const defaultMethodNames = ['tempo', 'spt'] as const
+type DefaultMethodName = (typeof defaultMethodNames)[number]
+
+type DefaultMethodsConfig = {
+  exclude?: DefaultMethodName[]
+}
+
+type SyncMethodsResult = DefaultMethods & {
+  additional<C extends AdditionalConfig>(config: C): DefaultMethodsWithAdditional<C>
+}
+
+interface StripeMachinePayments<P extends stripe.Parameters = stripe.Parameters> {
+  spt: {
+    charge: (params?: { paymentMethodTypes?: string[] }) => SptServer
+  }
+  tempo: {
+    charge: (
+      params: { recipient: stripe.DepositAddress<'tempo'> } & Partial<
+        Omit<Parameters<typeof tempoCharge>[0], 'currency' | 'recipient'>
+      >,
+    ) => TempoServer
+    session: (
+      params: { recipient: stripe.DepositAddress<'tempo'> } & Omit<
+        tempoSession.Parameters,
+        'currency' | 'recipient'
+      >,
+    ) => TempoSessionServer
+  }
+  base: {
+    charge: (params: { recipient: stripe.DepositAddress<'base'> } & BaseConfig) => EvmServer
+  }
+  findOrCreateDepositAddress: <N extends stripe.Network>(
+    network: N,
+  ) => Promise<stripe.DepositAddress<N>>
+  defaultMethods: (
+    config?: DefaultMethodsConfig,
+  ) => P['depositAddresses'] extends Partial<Record<stripe.Network, string>>
+    ? SyncMethodsResult
+    : DefaultMethodsBuilder
+}
+
+class DefaultMethodsBuilder implements PromiseLike<DefaultMethods> {
+  readonly #resolve: (additional?: AdditionalConfig) => Promise<any>
+  #additional: AdditionalConfig | undefined
+
+  constructor(resolve: (additional?: AdditionalConfig) => Promise<any>) {
+    this.#resolve = resolve
+  }
+
+  additional<C extends AdditionalConfig>(config: C): PromiseLike<DefaultMethodsWithAdditional<C>> {
+    this.#additional = config
+    return this as unknown as PromiseLike<DefaultMethodsWithAdditional<C>>
+  }
+
+  then<T = DefaultMethods, U = never>(
+    onfulfilled?: ((value: DefaultMethods) => T | PromiseLike<T>) | null,
+    onrejected?: ((reason: unknown) => U | PromiseLike<U>) | null,
+  ): Promise<T | U> {
+    return this.#resolve(this.#additional).then(onfulfilled, onrejected)
+  }
+}
 
 /**
- * Creates a Stripe `charge` method for usage on the server.
+ * Creates a configured Stripe machine payments instance.
  *
  * @example
  * ```ts
  * import { Mppx, stripe } from 'mppx/server'
  *
+ * const machinePayments = stripe.create({
+ *   client: stripeClient,
+ *   networkId: process.env.STRIPE_PROFILE_ID!,
+ *   livemode: !process.env.STRIPE_SECRET_KEY!.includes('_test_'),
+ * })
+ *
+ * // Async: deposit addresses resolved from Stripe API
  * const mppx = Mppx.create({
- *   methods: [stripe({ secretKey: 'sk_...' })],
+ *   methods: await machinePayments.defaultMethods(),
+ *   secretKey: mppSecretKey,
+ * })
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Sync: deposit addresses provided statically
+ * const machinePayments = stripe.create({
+ *   client: stripeClient,
+ *   networkId: process.env.STRIPE_PROFILE_ID!,
+ *   livemode: !process.env.STRIPE_SECRET_KEY!.includes('_test_'),
+ *   depositAddresses: { tempo: process.env.TEMPO_DEPOSIT_ADDRESS! },
+ * })
+ *
+ * const mppx = Mppx.create({
+ *   methods: machinePayments.defaultMethods(),
+ *   secretKey: mppSecretKey,
+ * })
+ * ```
+ *
+ * @example
+ * ```ts
+ * // With additional custom rails
+ * const mppx = Mppx.create({
+ *   methods: await machinePayments.defaultMethods().additional({
+ *     base: { x402: { facilitator } },
+ *     solana: (address) => solana.charge({ recipient: address, currency: USDC, decimals: 6 }),
+ *   }),
+ *   secretKey: mppSecretKey,
  * })
  * ```
  */
-export function stripe<const parameters extends stripe.Parameters>(parameters: parameters) {
-  return [stripe.charge(parameters)] as const
+export function stripe<const P extends stripe.Parameters>(parameters: P): StripeMachinePayments<P> {
+  const { client, networkId, livemode, connect, depositAddresses } = parameters
+  if (!client.rawRequest)
+    throw new Error('stripe.create() requires a Stripe SDK client with rawRequest() (v15+)')
+  const tempoCurrency = (
+    livemode ? tempoDefaults.tokens.usdc : tempoDefaults.tokens.pathUsd
+  ) as `0x${string}`
+  const tempoPaymentHandler = createPaymentSuccessHandler(client, 'tempo', connect)
+  const basePaymentHandler = createPaymentSuccessHandler(client, 'base', connect)
+
+  function makeSptCharge(params?: { paymentMethodTypes?: string[] }): Method.AnyServer {
+    return charge_({
+      client,
+      networkId,
+      currency: 'usd',
+      decimals: 2,
+      paymentMethodTypes: params?.paymentMethodTypes ?? ['card', 'link'],
+      ...(connect && { connect }),
+    } as Parameters<typeof charge_>[0]) as Method.AnyServer
+  }
+
+  function makeTempoCharge(
+    params: { recipient: `0x${string}` } & Partial<
+      Omit<Parameters<typeof tempoCharge>[0], 'currency' | 'recipient'>
+    >,
+  ): Method.AnyServer {
+    const { recipient, ...rest } = params
+    return tempoCharge({
+      currency: tempoCurrency,
+      recipient,
+      ...(!livemode && { testnet: true }),
+      onPaymentSuccess: tempoPaymentHandler,
+      ...rest,
+    }) as Method.AnyServer
+  }
+
+  function makeTempoSession(
+    params: { recipient: `0x${string}` } & Omit<tempoSession.Parameters, 'currency' | 'recipient'>,
+  ): Method.AnyServer {
+    const { recipient, ...rest } = params
+    return tempoSession({
+      currency: tempoCurrency,
+      recipient,
+      ...(!livemode && { testnet: true }),
+      ...rest,
+    } as tempoSession.Parameters) as Method.AnyServer
+  }
+
+  function makeBaseCharge(params: { recipient: `0x${string}` } & BaseConfig): Method.AnyServer {
+    const { recipient, x402, ...rest } = params
+    return evmCharge({
+      currency: livemode ? EvmAssets.base.USDC : EvmAssets.baseSepolia.USDC,
+      recipient,
+      x402,
+      onPaymentSuccess: basePaymentHandler,
+      ...rest,
+    }) as Method.AnyServer
+  }
+
+  const defaultMethodBuilders: Record<
+    DefaultMethodName,
+    (addresses: Map<string, string>) => Method.AnyServer | null
+  > = {
+    tempo: (addresses) => {
+      const address = addresses.get('tempo')
+      if (!address) return null
+      return makeTempoCharge({ recipient: address as `0x${string}` })
+    },
+    spt: () => makeSptCharge(),
+  }
+
+  type AdditionalBuiltinKey = 'base' | 'tempo'
+
+  const additionalBuilders: Record<
+    AdditionalBuiltinKey,
+    (addresses: Map<string, string>, config: AdditionalConfig) => Method.AnyServer | null
+  > = {
+    base: (addresses, config) => {
+      if (!config.base) return null
+      const address = addresses.get('base')
+      if (!address) return null
+      return makeBaseCharge({ recipient: address as `0x${string}`, ...config.base })
+    },
+    tempo: (addresses, config) => {
+      if (!config.tempo?.session) return null
+      const address = addresses.get('tempo')
+      if (!address) return null
+      return makeTempoSession({ recipient: address as `0x${string}`, ...config.tempo.session })
+    },
+  }
+
+  function createMethodsFromAddresses(
+    addresses: Map<string, string>,
+    excluded: Set<string>,
+    additional?: AdditionalConfig,
+  ): DefaultMethods {
+    const result: Method.AnyServer[] = []
+
+    for (const name of defaultMethodNames) {
+      if (excluded.has(name)) continue
+      const method = defaultMethodBuilders[name](addresses)
+      if (method) result.push(method)
+    }
+
+    if (additional) {
+      for (const key of Object.keys(additionalBuilders) as AdditionalBuiltinKey[]) {
+        const method = additionalBuilders[key](addresses, additional)
+        if (method) result.push(method)
+      }
+
+      for (const [network, factory] of customRails(additional)) {
+        const address = requireAddress(addresses, network)
+        const handler = createPaymentSuccessHandler(client, network as stripe.Network, connect)
+        for (const m of toArray(factory(address))) {
+          result.push({ ...m, onPaymentSuccess: m.onPaymentSuccess ?? handler } as Method.AnyServer)
+        }
+      }
+    }
+
+    return result as unknown as DefaultMethods
+  }
+
+  function resolveAddress(network: string): Promise<string> {
+    if (typeof depositAddresses === 'function') return depositAddresses(network as stripe.Network)
+    return _findOrCreateDepositAddress(client, network, connect ? { connect } : undefined)
+  }
+
+  function defaultMethods(
+    config?: DefaultMethodsConfig,
+  ): SyncMethodsResult | DefaultMethodsBuilder {
+    const excluded = new Set(config?.exclude)
+
+    if (depositAddresses && typeof depositAddresses !== 'function') {
+      // Sync: static deposit addresses provided at stripe.create() time
+      const addresses = new Map(Object.entries(depositAddresses)) as Map<string, string>
+      return Object.assign(createMethodsFromAddresses(addresses, excluded), {
+        additional: (additional: AdditionalConfig) =>
+          createMethodsFromAddresses(addresses, excluded, additional),
+      }) as SyncMethodsResult
+    } else {
+      // Async: resolve addresses dynamically
+      return new DefaultMethodsBuilder(async (additional) => {
+        const networks = neededNetworks(excluded, additional)
+        const results = await Promise.all(
+          networks.map(async (network) => ({
+            network,
+            address: await resolveAddress(network),
+          })),
+        )
+        const addresses = new Map(results.map(({ network, address }) => [network, address]))
+        return createMethodsFromAddresses(addresses, excluded, additional)
+      })
+    }
+  }
+
+  return {
+    spt: { charge: makeSptCharge },
+    tempo: { charge: makeTempoCharge, session: makeTempoSession },
+    base: { charge: makeBaseCharge },
+    findOrCreateDepositAddress: async <N extends stripe.Network>(network: N) => {
+      const address = await resolveAddress(network)
+      return address as stripe.DepositAddress<N>
+    },
+    defaultMethods,
+  } as StripeMachinePayments
 }
 
 export namespace stripe {
-  export type Parameters = charge_.Parameters
+  export const spt = charge_
 
-  /** Creates a Stripe `charge` method for SPT-based payments. */
+  /** @deprecated Use `stripe.spt()` instead. */
   export const charge = charge_
+
+  export const create = stripe
+
+  export const findOrCreateDepositAddress = _findOrCreateDepositAddress
+}
+
+function neededNetworks(excluded: Set<string>, additional?: AdditionalConfig): string[] {
+  const networks: string[] = []
+  if (!excluded.has('tempo') || additional?.tempo?.session) networks.push('tempo')
+  if (additional?.base) networks.push('base')
+  for (const [network, value] of Object.entries(additional ?? {})) {
+    if (network === 'base' || network === 'tempo') continue
+    if (typeof value === 'function') networks.push(network)
+  }
+  return networks
+}
+
+function requireAddress(addresses: Map<string, string>, network: string): string {
+  const address = addresses.get(network)
+  if (!address) throw new Error(`stripe: missing deposit address for ${network}`)
+  return address
+}
+
+function toArray(
+  value: Method.AnyServer | readonly Method.AnyServer[],
+): readonly Method.AnyServer[] {
+  return Array.isArray(value) ? value : [value]
+}
+
+function customRails(additional?: AdditionalConfig): [string, CustomRailFactory][] {
+  if (!additional) return []
+  return Object.entries(additional).filter((entry): entry is [string, CustomRailFactory] => {
+    const [k, v] = entry
+    return k !== 'base' && k !== 'tempo' && typeof v === 'function'
+  })
+}
+
+function createPaymentSuccessHandler(
+  client: StripeClient,
+  network: stripe.Network,
+  connect?: ConnectConfig,
+) {
+  return (params: { receipt: any; request: any }) => {
+    const { receipt, request } = params
+    if (receipt?.reference && request?.amount) {
+      recordCryptoPayment(client, {
+        network,
+        reference: receipt.reference,
+        amount: String(request.amount),
+        ...(connect && { connect }),
+      })
+    }
+  }
 }

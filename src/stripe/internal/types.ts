@@ -14,6 +14,7 @@ export type StripeClient = {
       lastResponse?: { headers?: Record<string, string> }
     }>
   }
+  rawRequest?(method: string, path: string, params?: any, options?: any): Promise<any>
 }
 
 /**
