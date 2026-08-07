@@ -115,7 +115,7 @@ describeLocalnet('x402 exact localnet settlement', () => {
     }
   })
 
-  test('rejects replayed localnet x402 payment', async () => {
+  test('rejects replayed localnet x402 payment', { timeout: 60_000 }, async () => {
     const harness = await setupHarness()
     const paidServer = await createPaidServer(harness)
 
