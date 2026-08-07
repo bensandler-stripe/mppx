@@ -68,7 +68,7 @@ test('provider convenience constructors forward canOffer', () => {
     settle: async () => ({ reference: '0x01' }),
   })
 
-  stripe({
+  stripe.charge({
     canOffer({ request }) {
       expectTypeOf(request.methodDetails.networkId).toEqualTypeOf<string>()
       return true

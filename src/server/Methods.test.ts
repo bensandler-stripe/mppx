@@ -47,7 +47,7 @@ describe('composable method hooks', () => {
     expect(evmCharge.canOffer).toBe(evmCanOffer)
 
     const stripeCanOffer = vi.fn(() => true)
-    const [stripeCharge] = stripe({
+    const stripeCharge = stripe.charge({
       canOffer: stripeCanOffer,
       client: {} as never,
       networkId: 'internal',

@@ -4,4 +4,4 @@
  * Required for `shared_payment_granted_token` (SPTs are in private preview).
  * Bump this when upgrading to a newer Stripe API version.
  */
-export const stripePreviewVersion = '2026-02-25.preview'
+export const stripePreviewVersion = '2026-07-29.preview'

@@ -91,6 +91,7 @@ export function charge<const parameters extends charge.Parameters>(parameters: p
   const {
     amount,
     canOffer,
+    onPaymentSuccess,
     currency,
     decimals,
     description,
@@ -146,6 +147,8 @@ export function charge<const parameters extends charge.Parameters>(parameters: p
       if (minimum !== undefined && BigInt(context.request.amount) < minimum) return false
       return (await canOffer?.(context)) ?? true
     },
+
+    onPaymentSuccess,
 
     async verify({ credential, envelope, request }) {
       const { challenge } = credential
