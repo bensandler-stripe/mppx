@@ -29,6 +29,7 @@ export declare namespace stripe {
     livemode: boolean
     connect?: ConnectConfig
     depositAddresses?: Partial<Record<Network, string>> | ((network: Network) => Promise<string>)
+    metadata?: Record<string, string> | undefined
   }
 }
 
@@ -86,9 +87,10 @@ interface StripeMachinePayments<P extends stripe.Parameters = stripe.Parameters>
   }
   tempo: {
     charge: (
-      params: { recipient: stripe.DepositAddress<'tempo'> } & Partial<
-        Omit<Parameters<typeof tempoCharge>[0], 'currency' | 'recipient'>
-      >,
+      params: {
+        recipient: stripe.DepositAddress<'tempo'>
+        metadata?: Record<string, string>
+      } & Partial<Omit<Parameters<typeof tempoCharge>[0], 'currency' | 'recipient'>>,
     ) => TempoServer
     session: (
       params: { recipient: stripe.DepositAddress<'tempo'> } & Omit<
@@ -98,7 +100,12 @@ interface StripeMachinePayments<P extends stripe.Parameters = stripe.Parameters>
     ) => TempoSessionServer
   }
   base: {
-    charge: (params: { recipient: stripe.DepositAddress<'base'> } & BaseConfig) => EvmServer
+    charge: (
+      params: {
+        recipient: stripe.DepositAddress<'base'>
+        metadata?: Record<string, string>
+      } & BaseConfig,
+    ) => EvmServer
   }
   findOrCreateDepositAddress: <N extends stripe.Network>(
     network: N,
@@ -180,14 +187,19 @@ class DefaultMethodsBuilder implements PromiseLike<DefaultMethods> {
  * ```
  */
 export function stripe<const P extends stripe.Parameters>(parameters: P): StripeMachinePayments<P> {
-  const { client, networkId, livemode, connect, depositAddresses } = parameters
+  const { client, networkId, livemode, connect, depositAddresses, metadata } = parameters
   if (!client.rawRequest)
     throw new Error('stripe.create() requires a Stripe SDK client with rawRequest() (v15+)')
   const tempoCurrency = (
     livemode ? tempoDefaults.tokens.usdc : tempoDefaults.tokens.pathUsd
   ) as `0x${string}`
-  const tempoPaymentHandler = createPaymentSuccessHandler(client, 'tempo', connect)
-  const basePaymentHandler = createPaymentSuccessHandler(client, 'base', connect)
+  const tempoPaymentHandler = createPaymentSuccessHandler(client, 'tempo', connect, metadata)
+  const basePaymentHandler = createPaymentSuccessHandler(client, 'base', connect, metadata)
+
+  // All stripe-managed crypto rails use 6-decimal stablecoins. Reject amounts
+  // below 1 cent since Stripe cannot record them.
+  const cryptoCanOffer = ({ request }: { request: { amount: string } }) =>
+    Number(request.amount) >= 10_000
 
   function makeSptCharge(params?: { paymentMethodTypes?: string[] }): Method.AnyServer {
     return charge_({
@@ -197,20 +209,25 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
       decimals: 2,
       paymentMethodTypes: params?.paymentMethodTypes ?? ['card', 'link'],
       ...(connect && { connect }),
+      ...(metadata && { metadata }),
     } as Parameters<typeof charge_>[0]) as Method.AnyServer
   }
 
   function makeTempoCharge(
-    params: { recipient: `0x${string}` } & Partial<
+    params: { recipient: `0x${string}`; metadata?: Record<string, string> } & Partial<
       Omit<Parameters<typeof tempoCharge>[0], 'currency' | 'recipient'>
     >,
   ): Method.AnyServer {
-    const { recipient, ...rest } = params
+    const { recipient, metadata: callMetadata, ...rest } = params
+    const handler = callMetadata
+      ? createPaymentSuccessHandler(client, 'tempo', connect, { ...metadata, ...callMetadata })
+      : tempoPaymentHandler
     return tempoCharge({
       currency: tempoCurrency,
       recipient,
       ...(!livemode && { testnet: true }),
-      onPaymentSuccess: tempoPaymentHandler,
+      canOffer: cryptoCanOffer,
+      onPaymentSuccess: handler,
       ...rest,
     }) as Method.AnyServer
   }
@@ -227,13 +244,19 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
     } as tempoSession.Parameters) as Method.AnyServer
   }
 
-  function makeBaseCharge(params: { recipient: `0x${string}` } & BaseConfig): Method.AnyServer {
-    const { recipient, x402, ...rest } = params
+  function makeBaseCharge(
+    params: { recipient: `0x${string}`; metadata?: Record<string, string> } & BaseConfig,
+  ): Method.AnyServer {
+    const { recipient, x402, metadata: callMetadata, ...rest } = params
+    const handler = callMetadata
+      ? createPaymentSuccessHandler(client, 'base', connect, { ...metadata, ...callMetadata })
+      : basePaymentHandler
     return evmCharge({
       currency: livemode ? EvmAssets.base.USDC : EvmAssets.baseSepolia.USDC,
       recipient,
       x402,
-      onPaymentSuccess: basePaymentHandler,
+      canOffer: cryptoCanOffer,
+      onPaymentSuccess: handler,
       ...rest,
     }) as Method.AnyServer
   }
@@ -289,13 +312,21 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
 
       for (const [network, factory] of customRails(additional)) {
         const address = requireAddress(addresses, network)
-        const recorder = createPaymentSuccessHandler(client, network as stripe.Network, connect)
+        const recorder = createPaymentSuccessHandler(
+          client,
+          network as stripe.Network,
+          connect,
+          metadata,
+        )
         for (const m of toArray(factory(address))) {
           const onPaymentSuccess = m.onPaymentSuccess
             ? (params: any) =>
                 Promise.all([m.onPaymentSuccess!(params), recorder(params)]).then(() => {})
             : recorder
-          result.push({ ...m, onPaymentSuccess } as Method.AnyServer)
+          const canOffer = m.canOffer
+            ? (params: any) => cryptoCanOffer(params) && m.canOffer!(params)
+            : cryptoCanOffer
+          result.push({ ...m, canOffer, onPaymentSuccess } as Method.AnyServer)
         }
       }
     }
@@ -393,6 +424,7 @@ function createPaymentSuccessHandler(
   client: StripeClient,
   network: stripe.Network,
   connect?: ConnectConfig,
+  metadata?: Record<string, string>,
 ) {
   return (params: { receipt: any; request: any }) => {
     const { receipt, request } = params
@@ -402,6 +434,7 @@ function createPaymentSuccessHandler(
         reference: receipt.reference,
         amount: String(request.amount),
         ...(connect && { connect }),
+        ...(metadata && { metadata }),
       })
     }
   }
