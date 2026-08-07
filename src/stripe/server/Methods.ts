@@ -66,8 +66,11 @@ type DefaultMethodsWithAdditional<C extends AdditionalConfig> = readonly [
   ...(C extends { tempo: { session: any } } ? [TempoSessionServer] : []),
 ]
 
-const defaultMethodNames = ['tempo', 'spt'] as const
-type DefaultMethodName = (typeof defaultMethodNames)[number]
+type DefaultMethodName = 'tempo' | 'spt'
+const defaultMethodNames: readonly DefaultMethodName[] = ['tempo', 'spt']
+
+type AdditionalBuiltinKey = 'base' | 'tempo'
+const additionalBuiltinKeys: readonly AdditionalBuiltinKey[] = ['base', 'tempo']
 
 type DefaultMethodsConfig = {
   exclude?: DefaultMethodName[]
@@ -247,8 +250,6 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
     spt: () => makeSptCharge(),
   }
 
-  type AdditionalBuiltinKey = 'base' | 'tempo'
-
   const additionalBuilders: Record<
     AdditionalBuiltinKey,
     (addresses: Map<string, string>, config: AdditionalConfig) => Method.AnyServer | null
@@ -354,13 +355,12 @@ export namespace stripe {
   export const findOrCreateDepositAddress = _findOrCreateDepositAddress
 }
 
-function neededNetworks(excluded: Set<string>, additional?: AdditionalConfig): string[] {
-  const networks: string[] = []
+function neededNetworks(excluded: Set<string>, additional?: AdditionalConfig): stripe.Network[] {
+  const networks: stripe.Network[] = []
   if (!excluded.has('tempo') || additional?.tempo?.session) networks.push('tempo')
   if (additional?.base) networks.push('base')
-  for (const [network, value] of Object.entries(additional ?? {})) {
-    if (network === 'base' || network === 'tempo') continue
-    if (typeof value === 'function') networks.push(network)
+  for (const [network] of customRails(additional)) {
+    networks.push(network as stripe.Network)
   }
   return networks
 }
@@ -381,7 +381,7 @@ function customRails(additional?: AdditionalConfig): [string, CustomRailFactory]
   if (!additional) return []
   return Object.entries(additional).filter((entry): entry is [string, CustomRailFactory] => {
     const [k, v] = entry
-    return k !== 'base' && k !== 'tempo' && typeof v === 'function'
+    return !(additionalBuiltinKeys as readonly string[]).includes(k) && typeof v === 'function'
   })
 }
 
