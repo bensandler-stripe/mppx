@@ -7,21 +7,26 @@ export type DepositAddressResolver = (
   options?: { connect?: ConnectConfig },
 ) => Promise<string>
 
-const cache = new Map<string, string>()
+const cache = new WeakMap<StripeClient, Map<string, string>>()
 
 /**
  * Finds an existing deposit address or creates a new one for the given network.
- * Cached per network+stripeAccount for the process lifetime.
+ * Cached per client+network+stripeAccount for the process lifetime.
  */
 export async function findOrCreateDepositAddress(
   client: StripeClient,
   network: string,
   options?: { connect?: ConnectConfig },
 ): Promise<string> {
+  let clientCache = cache.get(client)
+  if (!clientCache) {
+    clientCache = new Map()
+    cache.set(client, clientCache)
+  }
   const key = options?.connect?.stripeAccount
     ? `${options.connect.stripeAccount}:${network}`
     : network
-  const cached = cache.get(key)
+  const cached = clientCache.get(key)
   if (cached) return cached
 
   const list = (await stripeRequest(
@@ -34,7 +39,7 @@ export async function findOrCreateDepositAddress(
     data?: { address: string }[]
   }
   if (list.data && list.data.length > 0) {
-    cache.set(key, list.data[0]!.address)
+    clientCache.set(key, list.data[0]!.address)
     return list.data[0]!.address
   }
 
@@ -47,6 +52,6 @@ export async function findOrCreateDepositAddress(
   )) as {
     address: string
   }
-  cache.set(key, created.address)
+  clientCache.set(key, created.address)
   return created.address
 }

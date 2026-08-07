@@ -11,7 +11,7 @@ const NETWORK_CONFIG: Record<stripe.Network, { stripeNetworkName: string; tokenD
 
 /**
  * Records a crypto payment as a Stripe PaymentIntent using transaction_verification mode.
- * Fire-and-forget: errors are logged but never thrown.
+ * Errors are logged but never thrown (the returned Promise always resolves).
  */
 export function recordCryptoPayment(
   client: StripeClient,
@@ -21,18 +21,19 @@ export function recordCryptoPayment(
     amount: string
     connect?: ConnectConfig
   },
-): void {
+): Promise<void> {
   const { network, reference, amount, connect } = parameters
   const { stripeNetworkName, tokenDecimals } = NETWORK_CONFIG[network]
 
   const amountCents = Math.round(Number(amount) / 10 ** (tokenDecimals - 2))
   if (amountCents < 1) {
-    throw new Error(
-      `[stripe] sub-cent crypto payment: ${amount} raw units on ${network} = ${amountCents} cents`,
+    console.warn(
+      `[stripe] skipping PI recording: ${amount} raw units on ${network} rounds to ${amountCents} cents (below Stripe minimum)`,
     )
+    return Promise.resolve()
   }
 
-  createPaymentIntent(
+  return createPaymentIntent(
     client,
     {
       amount: amountCents,
@@ -54,7 +55,10 @@ export function recordCryptoPayment(
       idempotencyKey: reference,
       ...(connect && { connect }),
     },
-  ).catch((err) => {
-    console.error('[stripe] failed to record crypto payment:', err)
-  })
+  ).then(
+    () => {},
+    (err) => {
+      console.error('[stripe] failed to record crypto payment:', err)
+    },
+  )
 }

@@ -289,9 +289,13 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
 
       for (const [network, factory] of customRails(additional)) {
         const address = requireAddress(addresses, network)
-        const handler = createPaymentSuccessHandler(client, network as stripe.Network, connect)
+        const recorder = createPaymentSuccessHandler(client, network as stripe.Network, connect)
         for (const m of toArray(factory(address))) {
-          result.push({ ...m, onPaymentSuccess: m.onPaymentSuccess ?? handler } as Method.AnyServer)
+          const onPaymentSuccess = m.onPaymentSuccess
+            ? (params: any) =>
+                Promise.all([m.onPaymentSuccess!(params), recorder(params)]).then(() => {})
+            : recorder
+          result.push({ ...m, onPaymentSuccess } as Method.AnyServer)
         }
       }
     }
@@ -393,7 +397,7 @@ function createPaymentSuccessHandler(
   return (params: { receipt: any; request: any }) => {
     const { receipt, request } = params
     if (receipt?.reference && request?.amount) {
-      recordCryptoPayment(client, {
+      return recordCryptoPayment(client, {
         network,
         reference: receipt.reference,
         amount: String(request.amount),
