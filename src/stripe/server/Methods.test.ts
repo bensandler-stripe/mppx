@@ -34,6 +34,44 @@ describe('stripe.create() defaultMethods', () => {
     expect(findMethod(methods, 'stripe', 'charge')).toBeDefined()
   })
 
+  test('forwards metadata to SPT method defaults', () => {
+    const client = createMockStripeClient()
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr' },
+      metadata: { agent_id: 'test-agent' },
+    })
+    const methods = mp.defaultMethods()
+    const sptMethod = findMethod(methods, 'stripe', 'charge')
+
+    expect((sptMethod as any).defaults?.metadata).toEqual({ agent_id: 'test-agent' })
+  })
+
+  test('forwards metadata to crypto PI recording', async () => {
+    const client = createMockStripeClient()
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr' },
+      metadata: { agent_id: 'test-agent' },
+    })
+    const methods = mp.defaultMethods()
+    const tempoMethod = findMethod(methods, 'tempo', 'charge')
+
+    await tempoMethod.onPaymentSuccess!({
+      receipt: { reference: '0xtx123' },
+      request: { amount: '500000' },
+    })
+
+    expect(client.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ metadata: { agent_id: 'test-agent' } }),
+      expect.anything(),
+    )
+  })
+
   test.each(['tempo', 'spt'] as const)('exclude removes %s', async (excluded) => {
     const client = createMockStripeClient()
     const mp = stripe({ client, networkId: 'test-profile', livemode: false })
@@ -87,6 +125,55 @@ describe('stripe.create() PI recording', () => {
 
     expect(result).toBeUndefined()
     expect(client.paymentIntents.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('stripe.create() canOffer minimum amount', () => {
+  test('tempo rejects amounts below 1 cent', () => {
+    const client = createMockStripeClient()
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr' },
+    })
+    const methods = mp.defaultMethods()
+    const tempoMethod = findMethod(methods, 'tempo', 'charge')
+
+    expect(
+      tempoMethod.canOffer!({ input: new Request('http://x'), request: { amount: '9999' } }),
+    ).toBe(false)
+    expect(
+      tempoMethod.canOffer!({ input: new Request('http://x'), request: { amount: '10000' } }),
+    ).toBe(true)
+  })
+
+  test('custom rail inherits minimum amount check', () => {
+    const client = createMockStripeClient()
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr', solana: 'SOLaddr' },
+    })
+    const methods = mp.defaultMethods().additional({
+      solana: (_address) => ({
+        name: 'solana',
+        intent: 'charge',
+        schema: {
+          request: { parse: (x: unknown) => x },
+          response: { parse: (x: unknown) => x },
+        } as AnyServer['schema'],
+      }),
+    })
+    const solanaMethod = findMethod(methods, 'solana', 'charge')
+
+    expect(
+      solanaMethod.canOffer!({ input: new Request('http://x'), request: { amount: '5000' } }),
+    ).toBe(false)
+    expect(
+      solanaMethod.canOffer!({ input: new Request('http://x'), request: { amount: '10000' } }),
+    ).toBe(true)
   })
 })
 
@@ -189,5 +276,128 @@ describe('stripe.create() deposit address cache isolation', () => {
 
     expect(addr1).toBe(addr2)
     expect(client.rawRequest).toHaveBeenCalledOnce()
+  })
+})
+
+describe('stripe methods composed with non-stripe methods', () => {
+  function makeIndependentMethod(): AnyServer {
+    return {
+      name: 'solana',
+      intent: 'charge',
+      schema: {
+        request: { parse: (x: unknown) => x },
+        response: { parse: (x: unknown) => x },
+      } as AnyServer['schema'],
+      onPaymentSuccess: vi.fn(),
+    } as unknown as AnyServer
+  }
+
+  test('independent methods are not modified by stripe factory', () => {
+    const client = createMockStripeClient()
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr' },
+    })
+    const stripeMethods = mp.defaultMethods()
+    const independent = makeIndependentMethod()
+    const originalHook = independent.onPaymentSuccess
+
+    const allMethods = [...stripeMethods, independent]
+    const solana = allMethods.find((m) => m.name === 'solana')!
+
+    expect(solana.onPaymentSuccess).toBe(originalHook)
+    expect(solana.canOffer).toBeUndefined()
+  })
+
+  test('stripe PI recording does not fire for independent methods', async () => {
+    const client = createMockStripeClient()
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr' },
+    })
+    const stripeMethods = mp.defaultMethods()
+    const independent = makeIndependentMethod()
+
+    // Stripe tempo's hook records a PI
+    const tempoMethod = findMethod(stripeMethods, 'tempo', 'charge')
+    await tempoMethod.onPaymentSuccess!({
+      receipt: { reference: '0xtx1' },
+      request: { amount: '500000' },
+    })
+    expect(client.paymentIntents.create).toHaveBeenCalledOnce()
+
+    // Independent method's hook does NOT touch stripe
+    independent.onPaymentSuccess!({
+      receipt: { reference: '0xtx2' },
+      request: { amount: '500000' },
+    })
+    expect(client.paymentIntents.create).toHaveBeenCalledOnce()
+    expect(independent.onPaymentSuccess).toHaveBeenCalledOnce()
+  })
+})
+
+describe('stripe.create() canOffer composition with user hook', () => {
+  test('user canOffer is checked after minimum amount passes', () => {
+    const client = createMockStripeClient()
+    const userCanOffer = vi.fn(() => false)
+
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr', solana: 'SOLaddr' },
+    })
+    const methods = mp.defaultMethods().additional({
+      solana: (_address) => ({
+        name: 'solana',
+        intent: 'charge',
+        schema: {
+          request: { parse: (x: unknown) => x },
+          response: { parse: (x: unknown) => x },
+        } as AnyServer['schema'],
+        canOffer: userCanOffer,
+      }),
+    })
+    const solanaMethod = findMethod(methods, 'solana', 'charge')
+
+    // Amount passes minimum but user rejects
+    expect(
+      solanaMethod.canOffer!({ input: new Request('http://x'), request: { amount: '50000' } }),
+    ).toBe(false)
+    expect(userCanOffer).toHaveBeenCalledOnce()
+  })
+
+  test('user canOffer is not called when amount is below minimum', () => {
+    const client = createMockStripeClient()
+    const userCanOffer = vi.fn(() => true)
+
+    const mp = stripe({
+      client,
+      networkId: 'test-profile',
+      livemode: false,
+      depositAddresses: { tempo: '0xtempoaddr', solana: 'SOLaddr' },
+    })
+    const methods = mp.defaultMethods().additional({
+      solana: (_address) => ({
+        name: 'solana',
+        intent: 'charge',
+        schema: {
+          request: { parse: (x: unknown) => x },
+          response: { parse: (x: unknown) => x },
+        } as AnyServer['schema'],
+        canOffer: userCanOffer,
+      }),
+    })
+    const solanaMethod = findMethod(methods, 'solana', 'charge')
+
+    // Amount below minimum - short-circuits, user hook never called
+    expect(
+      solanaMethod.canOffer!({ input: new Request('http://x'), request: { amount: '5000' } }),
+    ).toBe(false)
+    expect(userCanOffer).not.toHaveBeenCalled()
   })
 })

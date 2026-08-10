@@ -20,9 +20,10 @@ export function recordCryptoPayment(
     reference: string
     amount: string
     connect?: ConnectConfig
+    metadata?: Record<string, string>
   },
 ): Promise<void> {
-  const { network, reference, amount, connect } = parameters
+  const { network, reference, amount, connect, metadata } = parameters
   const { stripeNetworkName, tokenDecimals } = NETWORK_CONFIG[network]
 
   const amountCents = Math.round(Number(amount) / 10 ** (tokenDecimals - 2))
@@ -50,6 +51,7 @@ export function recordCryptoPayment(
           },
         },
       },
+      ...(metadata && { metadata }),
     },
     {
       idempotencyKey: reference,
