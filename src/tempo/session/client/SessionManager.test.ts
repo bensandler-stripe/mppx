@@ -209,6 +209,25 @@ describe('Session', () => {
       ).toBe(80n)
     })
 
+    test('keeps locally confirmed spend when the close-ready receipt is stale', () => {
+      const receipt = createSessionReceipt({
+        acceptedCumulative: 100n,
+        challengeId,
+        channelId,
+        spent: 40n,
+      })
+
+      expect(
+        computeFallbackCloseAmount({
+          challengeId,
+          channelId,
+          closeReadyReceipt: receipt,
+          cumulativeAmount: 100n,
+          spent: 50n,
+        }),
+      ).toBe(50n)
+    })
+
     test('uses matching socket delivery estimate clamped to cumulative authorization', () => {
       expect(
         computeFallbackCloseAmount({
@@ -224,7 +243,7 @@ describe('Session', () => {
       ).toBe(90n)
     })
 
-    test('uses receipt-tracked spend when no socket estimate applies', () => {
+    test('uses local cumulative authorization when no socket estimate applies', () => {
       expect(
         computeFallbackCloseAmount({
           challengeId,
@@ -236,7 +255,7 @@ describe('Session', () => {
           spent: 40n,
           tickCost: 10n,
         }),
-      ).toBe(40n)
+      ).toBe(100n)
     })
   })
 
