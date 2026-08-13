@@ -48,6 +48,7 @@ async function writeResponseBody(response: Response) {
 }
 
 const tempoOptionSchema = z.object({
+  allowCustomEscrow: z.optional(booleanOption),
   autoSwap: z.optional(booleanOption),
   channel: z.optional(z.coerce.string()),
   deposit: z.optional(z.union([z.string(), z.number()])),
@@ -56,6 +57,7 @@ const tempoOptionSchema = z.object({
   tokenIn: z.optional(z.string()),
 })
 const tempoOptionKeys = [
+  'allowCustomEscrow',
   'autoSwap',
   'channel',
   'deposit',
@@ -249,6 +251,9 @@ export function tempo() {
 
       const methods = tempoMethods({
         account,
+        ...(tempoOpts.allowCustomEscrow !== undefined
+          ? { allowCustomEscrow: tempoOpts.allowCustomEscrow }
+          : {}),
         getClient: () => client!,
         ...(autoSwap !== undefined ? { autoSwap } : {}),
         maxDeposit: (() => {

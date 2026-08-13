@@ -2,7 +2,11 @@ import type { Hex } from 'viem'
 import { describe, expect, test } from 'vp/test'
 
 import type * as Challenge from '../../Challenge.js'
-import { resolveSessionMaxDeposit, resolveSessionSelection } from './request.js'
+import {
+  resolveAllowCustomEscrow,
+  resolveSessionMaxDeposit,
+  resolveSessionSelection,
+} from './request.js'
 
 const channelId = `0x${'12'.repeat(32)}` as Hex
 describe('resolveSessionSelection', () => {
@@ -22,6 +26,20 @@ describe('resolveSessionSelection', () => {
   test('rejects conflicting selectors', () => {
     expect(() => resolveSessionSelection('new', channelId)).toThrow(
       '--session and -M channel= select different sessions.',
+    )
+  })
+})
+
+describe('resolveAllowCustomEscrow', () => {
+  test('accepts boolean method options', () => {
+    expect(resolveAllowCustomEscrow({ allowCustomEscrow: 'true' })).toBe(true)
+    expect(resolveAllowCustomEscrow({ allowCustomEscrow: 'false' })).toBe(false)
+    expect(resolveAllowCustomEscrow({})).toBeUndefined()
+  })
+
+  test('rejects an invalid boolean', () => {
+    expect(() => resolveAllowCustomEscrow({ allowCustomEscrow: 'yes' })).toThrow(
+      'allowCustomEscrow must be true or false.',
     )
   })
 })

@@ -84,6 +84,21 @@ function sessionDecimals(challenge: Challenge.Challenge): number {
   return typeof challenge.request.decimals === 'number' ? challenge.request.decimals : 6
 }
 
+/** @internal Resolves whether the CLI accepts a server-advertised custom escrow. */
+export function resolveAllowCustomEscrow(
+  methodOptions: Record<string, string>,
+): boolean | undefined {
+  const value = methodOptions.allowCustomEscrow
+  if (value === undefined) return undefined
+  if (value === 'true') return true
+  if (value === 'false') return false
+  throw new Errors.IncurError({
+    code: 'INVALID_ALLOW_CUSTOM_ESCROW',
+    message: 'allowCustomEscrow must be true or false.',
+    exitCode: 2,
+  })
+}
+
 /** @internal Resolves the manager deposit cap in human-readable token units. */
 export function resolveSessionMaxDeposit(
   challenge: Challenge.Challenge,
@@ -148,7 +163,9 @@ export async function runPersistentSessionRequest(
   const rpcUrl = resolveRpcUrl(options.rpcUrl, { network: options.network })
   const chain = await resolveChain({ network: options.network, rpcUrl })
   const client = createClient({ chain, transport: http(rpcUrl) })
+  const allowCustomEscrow = resolveAllowCustomEscrow(parameters.methodOptions)
   const challengeContext = await resolveChallengeContext({
+    allowCustomEscrow,
     challenge: parameters.challenge,
     getClient: async () => client,
   })
@@ -253,6 +270,7 @@ export async function runPersistentSessionRequest(
     let replayPending = true
     const manager = sessionManager({
       account: resolvedAccount.account,
+      allowCustomEscrow,
       bootstrap: false,
       client,
       channelStore,

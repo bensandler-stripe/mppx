@@ -74,7 +74,7 @@ export type SessionContext = z.infer<typeof sessionContextSchema>
  * ```
  */
 export function session(parameters: session.Parameters = {}) {
-  const { decimals = defaults.decimals } = parameters
+  const { allowCustomEscrow = false, decimals = defaults.decimals } = parameters
 
   const getClient = Client.getResolver({
     chain: tempo_chain,
@@ -105,9 +105,9 @@ export function session(parameters: session.Parameters = {}) {
   ): Address {
     if (channelId) {
       const cached = escrowContractMap.get(channelId)
-      if (cached) return cached
+      if (cached) return resolveEscrow(challenge, chainId, cached)
     }
-    return resolveEscrow(challenge, chainId, parameters.escrowContract)
+    return resolveEscrow(challenge, chainId, parameters.escrowContract, allowCustomEscrow)
   }
 
   async function autoManageCredential(
@@ -381,13 +381,15 @@ export function session(parameters: session.Parameters = {}) {
 export declare namespace session {
   type Parameters = Account.getResolver.Parameters &
     Client.getResolver.Parameters & {
+      /** Accept a noncanonical escrow contract advertised by the server. @default false */
+      allowCustomEscrow?: boolean | undefined
       /** Account that signs voucher digests. Defaults to `account`; access-key accounts sign raw vouchers as their access-key address. */
       voucherSigner?: viem_Account | undefined
       /** Token decimals for parsing human-readable amounts (default: 6). */
       decimals?: number | undefined
       /** Initial deposit amount in human-readable units (e.g. "10" for 10 tokens). When set, the method handles the full channel lifecycle (open, voucher, cumulative tracking) automatically. */
       deposit?: string | undefined
-      /** Escrow contract address override. Derived from challenge or defaults if not provided. */
+      /** Exact escrow contract address pin. Takes precedence over `allowCustomEscrow`. */
       escrowContract?: Address | undefined
       /** Maximum deposit in human-readable units (e.g. "10"). Caps the server's `suggestedDeposit`. Enables auto-management like `deposit`. */
       maxDeposit?: string | undefined

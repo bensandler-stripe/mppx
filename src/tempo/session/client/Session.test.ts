@@ -804,9 +804,14 @@ describe('precompile client session', () => {
     ).rejects.toThrow('opening deposit 50 below request amount 100')
   })
 
-  test('uses resolved escrow address for open transactions', async () => {
+  test('uses a server-configured custom escrow when allowed', async () => {
     const challengeEscrow = '0x0000000000000000000000000000000000000005' as Address
-    const method = session({ account, decimals: 0, getClient: () => client })
+    const method = session({
+      account,
+      allowCustomEscrow: true,
+      decimals: 0,
+      getClient: () => client,
+    })
     const payload = deserialize(
       await method.createCredential({
         challenge: makeChallenge({
@@ -824,6 +829,25 @@ describe('precompile client session', () => {
     expect(payload.channelId).toBe(
       Channel.computeId({ ...payload.descriptor, chainId, escrow: challengeEscrow }),
     )
+  })
+
+  test.each([
+    ['omitted', {}],
+    ['false', { allowCustomEscrow: false }],
+  ] as const)('rejects a custom escrow when allowCustomEscrow is %s', async (_label, options) => {
+    const method = session({ account, decimals: 0, getClient: () => client, ...options })
+
+    await expect(
+      method.createCredential({
+        challenge: makeChallenge({
+          methodDetails: {
+            chainId,
+            escrowContract: '0x0000000000000000000000000000000000000005',
+          },
+        }),
+        context: {},
+      }),
+    ).rejects.toThrow('does not match client escrow')
   })
 
   test('uses challenge-advertised operator for open transactions', async () => {
