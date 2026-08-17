@@ -25,4 +25,4 @@ jobs:
       - name: Prerelease
         run: |
           pnpm run build
-          pnpm exec pkg-pr-new publish
+          pnpm exec pkg-pr-new publish --pnpm

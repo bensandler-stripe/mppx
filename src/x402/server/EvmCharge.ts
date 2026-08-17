@@ -40,12 +40,35 @@ export type Options = {
   fetch?: typeof globalThis.fetch | undefined
   /** Maximum time in seconds allowed for x402-compatible payment completion. @default 300 */
   maxTimeoutSeconds?: number | undefined
+  /**
+   * How a route-scoped charge binds an x402 credential to its route.
+   *
+   * - `'resource'` — accept either binding. A credential carrying
+   *   `extensions.mppx` is verified in full, including the route-bound nonce; one
+   *   without it is bound the way x402 itself binds, by comparing the echoed
+   *   `resource` and `accepted`. Any spec-compliant client can pay a scoped route.
+   * - `'required'` — every credential must carry `extensions.mppx` and the
+   *   route-bound nonce. Only clients that implement mppx's binding can pay.
+   *
+   * `'resource'` is weaker for clients that don't bind: `resource` sits outside
+   * the EIP-3009 signature, so a holder of a valid payload could re-present it at
+   * another route with identical `accepted`. It prevents honest cross-route reuse
+   * and client bugs, not an active attacker. Body binding is unaffected either
+   * way — `challenge.digest` is verified against the actual body.
+   *
+   * @default 'resource'
+   */
+  routeBinding?: RouteBindingMode | undefined
 }
+
+/** How a route-scoped charge binds an x402 credential to its route. */
+export type RouteBindingMode = 'required' | 'resource'
 
 export type ResolvedOptions = {
   authorization: Types.AuthorizationConfig
   facilitator?: x402_Types.Facilitator | undefined
   maxTimeoutSeconds: number
+  routeBinding: RouteBindingMode
 }
 
 export type Path = {
@@ -78,6 +101,7 @@ export function resolveOptions(parameters: {
         }
       : {}),
     maxTimeoutSeconds: parameters.options?.maxTimeoutSeconds ?? 300,
+    routeBinding: parameters.options?.routeBinding ?? 'resource',
   }
 }
 
@@ -117,7 +141,12 @@ export function createPath(config: ResolvedOptions): Path {
         challenge.digest !== undefined ||
         challenge.opaque !== undefined ||
         challenge.meta !== undefined
-      if (routeRequiresBinding && !isRouteBound)
+      // `extensions.mppx` binding is not part of the x402 spec, so a client mppx
+      // did not write cannot produce it. Requiring it makes every scoped route —
+      // and everything behind `Proxy`, which scopes what it serves — unpayable by
+      // third-party wallets. Under 'resource' such a credential falls through to
+      // the binding x402 itself defines instead of being rejected outright.
+      if (routeRequiresBinding && !isRouteBound && config.routeBinding === 'required')
         throw new VerificationFailedError({
           reason: 'x402 payment payload does not bind required route metadata',
         })
@@ -132,6 +161,21 @@ export function createPath(config: ResolvedOptions): Path {
         if (!containsExtensions(paymentPayload.extensions, expectedExtensions))
           throw new VerificationFailedError({
             reason: 'x402 payment payload extensions do not match route binding',
+          })
+      } else if (routeRequiresBinding) {
+        // A scoped route still binds what x402 makes bindable: the resource must
+        // be echoed, not merely left out, which is the one thing a scope can ask
+        // of a client that doesn't implement mppx's binding. `accepted` was
+        // compared above, and `challenge.digest` was verified against the body by
+        // assertBodyDigest().
+        //
+        // Only the URL is compared. `ResourceInfo` carries optional descriptive
+        // fields that mppx neither advertises nor attaches meaning to, so
+        // demanding their absence would reject a client echoing an enriched
+        // resource without binding anything in return.
+        if (paymentPayload.resource?.url !== expectedResource.url)
+          throw new VerificationFailedError({
+            reason: 'x402 payment payload resource does not match route resource',
           })
       } else if (
         paymentPayload.resource !== undefined &&

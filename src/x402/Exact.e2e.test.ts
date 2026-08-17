@@ -322,6 +322,12 @@ describe('x402 exact e2e', () => {
     }
     expect(verifyCalls).toBe(2)
 
+    // A scoped charge at the same URL accepts the same standard credential.
+    // Nothing a spec-compliant client echoes can distinguish two charges that
+    // share a URL and a price: `resource` and `accepted` are equal, and neither
+    // is covered by the EIP-3009 signature. Scope on the x402 rail is therefore
+    // advisory unless the client implements mppx's own binding — which is what
+    // `routeBinding: 'required'` demands, asserted below.
     const scopedRoute = payment.evm.charge({
       amount: '0.01',
       scope: 'POST /body',
@@ -333,8 +339,46 @@ describe('x402 exact e2e', () => {
         method: 'POST',
       }),
     )
-    expect(scopedResult.status).toBe(402)
-    expect(verifyCalls).toBe(2)
+    expect(scopedResult.status).toBe(200)
+    expect(verifyCalls).toBe(3)
+
+    const strict = ServerMppx.create({
+      methods: [
+        evm.charge({
+          currency: evm.assets.baseSepolia.USDC,
+          recipient: accounts[0].address,
+          x402: {
+            facilitator: {
+              async verify() {
+                verifyCalls++
+                return { isValid: true }
+              },
+              async settle(paymentPayload: Types.PaymentPayload) {
+                return {
+                  network: paymentPayload.accepted.network,
+                  success: true,
+                  transaction,
+                }
+              },
+            },
+            routeBinding: 'required',
+          },
+        }),
+      ],
+      secretKey,
+    })
+    const strictResult = await strict.evm.charge({
+      amount: '0.01',
+      scope: 'POST /body',
+    })(
+      new Request('https://example.com/body', {
+        body,
+        headers: { [Types.paymentSignatureHeader]: paymentSignatures[0]! },
+        method: 'POST',
+      }),
+    )
+    expect(strictResult.status).toBe(402)
+    expect(verifyCalls).toBe(3)
   })
 
   test('serves tempo and x402 from one composed live endpoint', async () => {

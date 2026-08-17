@@ -2,15 +2,19 @@ import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import type { IncomingMessage } from 'node:http'
 
+import { x402Client, x402HTTPClient } from '@x402/core/client'
 import { x402Facilitator } from '@x402/core/facilitator'
 import { HTTPFacilitatorClient, x402ResourceServer } from '@x402/core/server'
 import type { PaymentPayload, PaymentRequirements } from '@x402/core/types'
 import { toFacilitatorEvmSigner } from '@x402/evm'
+import { ExactEvmScheme as ExactEvmClient } from '@x402/evm/exact/client'
 import { ExactEvmScheme as ExactEvmFacilitator } from '@x402/evm/exact/facilitator'
 import { ExactEvmScheme as ExactEvmServer } from '@x402/evm/exact/server'
 import { paymentMiddleware } from '@x402/express'
 import express from 'express'
-import { evm as evmClient, Mppx } from 'mppx/client'
+import { evm as evmClient, Mppx as ClientMppx } from 'mppx/client'
+import { Proxy } from 'mppx/proxy'
+import { evm as evmServer, Mppx as ServerMppx } from 'mppx/server'
 import type { Abi, Address, Hex } from 'viem'
 import {
   createClient,
@@ -78,6 +82,68 @@ type CoinbaseHarness = {
 }
 
 describeLocalnet('Coinbase x402 client interoperability', () => {
+  test(
+    'pays an automatically scoped mppx proxy with the Coinbase client',
+    { timeout: 60_000 },
+    async () => {
+      const harness = await setupCoinbaseHarness()
+
+      try {
+        const proxy = createMppxProxy(harness)
+        const url = 'https://example.com/proxy/coinbase/paid'
+        const challenge = await proxy.fetch(new Request(url))
+        expect(challenge.status).toBe(402)
+
+        const client = new x402Client().register(network, new ExactEvmClient(payer))
+        const httpClient = new x402HTTPClient(client)
+        const paymentRequired = httpClient.getPaymentRequiredResponse((name) =>
+          challenge.headers.get(name),
+        )
+        const paymentPayload = await httpClient.createPaymentPayload(paymentRequired)
+        const headers = httpClient.encodePaymentSignatureHeader(paymentPayload)
+        const credential = new Headers(headers).get(Types.paymentSignatureHeader)
+        expect(credential).toBeTruthy()
+
+        const decodedPayload = Header.decodePaymentSignature(credential!)
+        expect(decodedPayload.extensions).toEqual(paymentRequired.extensions)
+        expect(decodedPayload.extensions?.mppx?.info).toMatchObject({
+          _mppx_scope: 'GET /proxy/coinbase/paid',
+          method: 'GET',
+        })
+        expect(decodedPayload.extensions?.mppx?.info.nonce).toBeUndefined()
+        if (!('authorization' in decodedPayload.payload)) throw new Error()
+        expect(decodedPayload.payload.authorization.nonce).toMatch(/^0x[0-9a-f]{64}$/)
+
+        const payerBefore = await balanceOf(harness.artifact, harness.token, payer.address)
+        const recipientBefore = await balanceOf(harness.artifact, harness.token, recipient.address)
+        const response = await proxy.fetch(new Request(url, { headers }))
+
+        expect(response.status).toBe(200)
+        expect(await response.text()).toBe('paid by Coinbase')
+        const paymentResponseHeader = response.headers.get(Types.paymentResponseHeader)
+        expect(paymentResponseHeader).toBeTruthy()
+        const paymentResponse = Header.decodePaymentResponse(paymentResponseHeader!)
+        const receipt = await waitForTransactionReceipt(payerClient, {
+          hash: paymentResponse.transaction as Hex,
+        })
+        expect(receipt.status).toBe('success')
+        expect(await balanceOf(harness.artifact, harness.token, payer.address)).toBe(
+          payerBefore - paymentAmount,
+        )
+        expect(await balanceOf(harness.artifact, harness.token, recipient.address)).toBe(
+          recipientBefore + paymentAmount,
+        )
+        expect(harness.facilitator.stats).toEqual({
+          settleRequests: 1,
+          supportedRequests: 1,
+          verifyRequests: 1,
+        })
+      } finally {
+        closeCoinbaseHarness(harness)
+      }
+    },
+  )
+
   test('pays a Coinbase resource server with the mppx client', { timeout: 60_000 }, async () => {
     const harness = await setupCoinbaseHarness()
 
@@ -324,7 +390,7 @@ function createMppxClient(token: Address) {
     transfer: { name: 'USDC', type: 'eip3009', version: '2' },
   })
 
-  return Mppx.create({
+  return ClientMppx.create({
     methods: [
       evmClient.charge({
         account: payer,
@@ -338,6 +404,39 @@ function createMppxClient(token: Address) {
         (a, b) => Number(ChallengeBrand.is(b.challenge)) - Number(ChallengeBrand.is(a.challenge)),
       ),
     polyfill: false,
+  })
+}
+
+function createMppxProxy(harness: CoinbaseHarness): Proxy.Proxy {
+  const asset = evmServer.assets.define({
+    address: harness.token,
+    decimals: 6,
+    network,
+    transfer: { name: 'USDC', type: 'eip3009', version: '2' },
+  })
+  const payment = ServerMppx.create({
+    methods: [
+      evmServer.charge({
+        currency: asset,
+        recipient: recipient.address,
+        x402: { facilitator: harness.facilitator.url },
+      }),
+    ],
+    secretKey: 'coinbase-x402-integration-secret-key',
+  })
+
+  return Proxy.create({
+    basePath: '/proxy',
+    async fetch() {
+      return new Response('paid by Coinbase')
+    },
+    services: [
+      {
+        baseUrl: 'https://upstream.example.com',
+        id: 'coinbase',
+        routes: { 'GET /paid': payment.charge({ amount: '0.01' }) },
+      },
+    ],
   })
 }
 
