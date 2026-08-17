@@ -60,6 +60,16 @@ function fakeUnknownKv() {
   }
 }
 
+function fakeTryClaim(seen?: string[]) {
+  const claimed = new Set<string>()
+  return async (key: string, _expires: number) => {
+    seen?.push(key)
+    if (claimed.has(key)) return false
+    claimed.add(key)
+    return true
+  }
+}
+
 describe.each([
   { label: 'memory', create: () => Store.memory() },
   { label: 'cloudflare', create: () => Store.cloudflare(fakeStringKv()) },
@@ -236,6 +246,59 @@ describe('tryClaim', () => {
     await store.put('k', Date.now() - 60_000)
 
     expect(await Store.tryClaim(store, 'k', Date.now() + 60_000)).toBe(false)
+  })
+
+  test('composes a Redis-native claim with the adapter', async () => {
+    const kv = fakeStringKv()
+    let updateCalls = 0
+    const store = Store.from({
+      ...Store.redis({
+        get: kv.get,
+        set: kv.put,
+        del: kv.delete,
+        update: (key, fn) => {
+          updateCalls++
+          return kv.update(key, fn)
+        },
+      }),
+      tryClaim: fakeTryClaim(),
+    })
+    const expires = Date.now() + 60_000
+
+    expect(await Store.tryClaim(store, 'k', expires)).toBe(true)
+    expect(await Store.tryClaim(store, 'k', expires)).toBe(false)
+    expect(updateCalls).toBe(0)
+  })
+
+  test('composes an Upstash-native claim with the adapter', async () => {
+    const store = Store.from({
+      ...Store.upstash(fakeUnknownKv()),
+      tryClaim: fakeTryClaim(),
+    })
+    const expires = Date.now() + 60_000
+
+    expect(await Store.tryClaim(store, 'k', expires)).toBe(true)
+    expect(await Store.tryClaim(store, 'k', expires)).toBe(false)
+  })
+
+  test('prefixes a composed native claim', async () => {
+    const kv = fakeStringKv()
+    const seen: string[] = []
+    const store = Store.from(
+      {
+        ...Store.redis({
+          get: kv.get,
+          set: kv.put,
+          del: kv.delete,
+          update: kv.update,
+        }),
+        tryClaim: fakeTryClaim(seen),
+      },
+      { keyPrefix: 'p:' },
+    )
+
+    expect(await Store.tryClaim(store, 'k', Date.now() + 60_000)).toBe(true)
+    expect(seen).toEqual(['p:k'])
   })
 })
 
