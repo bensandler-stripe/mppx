@@ -432,8 +432,6 @@ function buildAnalytics(parameters: { credential: Credential.Credential }): Reco
   const { credential } = parameters
   const { challenge } = credential
   return {
-    mpp_version: '1',
-    mpp_is_mpp: 'true',
     mpp_intent: challenge.intent,
     mpp_challenge_id: challenge.id,
     mpp_server_id: challenge.realm,

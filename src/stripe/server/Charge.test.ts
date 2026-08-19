@@ -207,7 +207,8 @@ describe('stripe.charge with client', () => {
 
     const [params] = create.mock.calls[0]!
     expect(params.metadata).toMatchObject({ plan: 'pro' })
-    expect(params.metadata.mpp_is_mpp).toBe('true')
+    expect(params.metadata).not.toHaveProperty('mpp_is_mpp')
+    expect(params.metadata).not.toHaveProperty('mpp_version')
   })
 
   test('behavior: applies Connect settlement parameters in client call', async () => {
