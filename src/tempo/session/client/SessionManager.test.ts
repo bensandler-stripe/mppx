@@ -725,6 +725,54 @@ describe('Session', () => {
       expect(s.channelId).not.toBe(storedChannelId)
     })
 
+    // The retry after a failed paid request must never evict entries whose
+    // descriptor is the only local copy (machine-rail, or any rewritten scope
+    // the current deployment table no longer recognizes).
+    test('keeps non-derivable channels instead of retrying without them', async () => {
+      const rotatedDescriptor = {
+        ...machineDescriptor,
+        operator: '0x00000000000000000000000000000000000000AA' as Address,
+        token: '0x20c0000000000000000000000000000000000009' as Address,
+      }
+      const paymentScope = {
+        payee: storedDescriptor.payee,
+        token: storedDescriptor.token,
+      }
+      const variants = [
+        // The challenge no longer advertises `machineTokenEnabled`.
+        channelEntry({ channelId: machineChannelId, descriptor: machineDescriptor, paymentScope }),
+        // Opened against a deployment the current table no longer lists.
+        channelEntry({
+          channelId: Channel.computeId({
+            ...rotatedDescriptor,
+            chainId: 4217,
+            escrow: tip20ChannelEscrow,
+          }),
+          descriptor: rotatedDescriptor,
+          paymentScope,
+        }),
+      ]
+      for (const seeded of variants) {
+        const { store, delete: remove, map } = makeChannelStore([seeded])
+        const mockFetch = vi.fn().mockImplementation((_input, init?: RequestInit) => {
+          const authorization = new Headers(init?.headers).get(Constants.Headers.authorization)
+          if (!authorization) return Promise.resolve(make402Response())
+          throw new Error('unexpected credential for a non-derivable machine channel')
+        })
+        const s = sessionManager({
+          account,
+          client,
+          fetch: mockFetch as typeof globalThis.fetch,
+          maxDeposit: '10',
+          channelStore: store,
+        })
+
+        await expect(s.fetch('https://api.example.com/data')).rejects.toThrow()
+        expect(remove).not.toHaveBeenCalled()
+        expect(map.get(entryKey(seeded))).toMatchObject({ channelId: seeded.channelId })
+      }
+    })
+
     test('keeps a persisted channel after its committed top-up when the paid retry fails', async () => {
       const seeded = channelEntry({ cumulativeAmount: 10_000_000n, deposit: 10_000_000n })
       const { store, delete: remove, map } = makeChannelStore([seeded])

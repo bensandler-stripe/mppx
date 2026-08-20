@@ -11,14 +11,12 @@ import * as Account from '../../../viem/Account.js'
 import * as Client from '../../../viem/Client.js'
 import { charge as chargePlugin } from '../../client/Charge.js'
 import * as defaults from '../../internal/defaults.js'
-import * as MachineTokenSession from '../../internal/machine-token-session.js'
-import type { ChannelEntry } from '../client/ChannelOps.js'
+import { hasRewrittenScope, isMachineChannel, type ChannelEntry } from '../client/ChannelOps.js'
 import { createChannelStore, entryKey, type ChannelStore } from '../client/ChannelStore.js'
 import { hydrateSessionSnapshot, type SessionContext } from '../client/CredentialState.js'
 import { session as sessionPlugin } from '../client/Session.js'
 import * as Channel from '../precompile/Channel.js'
 import { deserializeSessionReceipt } from '../precompile/Protocol.js'
-import { tip20ChannelEscrow } from '../precompile/Protocol.js'
 import type { SessionReceipt } from '../precompile/Protocol.js'
 import {
   deserializeSnapshot as deserializeSessionSnapshot,
@@ -427,9 +425,7 @@ export function sessionManager(parameters: sessionManager.Parameters): SessionMa
       })) ?? defaultAccount
     const hydrated = await hydrateSessionSnapshot({ account, client, snapshot })
     const entry =
-      paymentScope &&
-      (paymentScope.payee.toLowerCase() !== hydrated.entry.descriptor.payee.toLowerCase() ||
-        paymentScope.token.toLowerCase() !== hydrated.entry.descriptor.token.toLowerCase())
+      paymentScope && hasRewrittenScope({ descriptor: hydrated.entry.descriptor, paymentScope })
         ? { ...hydrated.entry, paymentScope }
         : hydrated.entry
     assertVoucherWithinLocalLimit(entry.cumulativeAmount)
@@ -560,12 +556,7 @@ export function sessionManager(parameters: sessionManager.Parameters): SessionMa
     const snapshot = applySnapshot
       ? applyCloseSnapshot(target, challenge)
       : validateCloseSnapshot(target.channel, challenge)
-    const machineSession =
-      target.channel.escrow.toLowerCase() === tip20ChannelEscrow.toLowerCase() &&
-      MachineTokenSession.matchDeployment({
-        chainId: target.channel.chainId,
-        descriptor: target.channel.descriptor,
-      }) !== undefined
+    const machineSession = isMachineChannel(target.channel)
     const closeAmount = snapshot
       ? machineSession
         ? snapshot.spent > snapshot.settled
@@ -729,6 +720,11 @@ export function sessionManager(parameters: sessionManager.Parameters): SessionMa
       async function retryWithoutResumed(): Promise<boolean> {
         const resumed = use.resumed
         if (!canRetryResumed || !resumed) return false
+        // A machine-token entry holds the only local copy of its channel
+        // descriptor; evicting it would strand the deposit, so fail loudly
+        // instead of retrying without it.
+        if (resumed.opened && (isMachineChannel(resumed) || hasRewrittenScope(resumed)))
+          return false
         canRetryResumed = false
         await ignoreChannel(resumed)
         effectiveInit = requestInitWithSessionHint(input, init, undefined)

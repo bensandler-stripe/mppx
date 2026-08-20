@@ -408,26 +408,32 @@ export function assertSettlementSender(parameters: SettlementSenderParameters) {
 }
 
 /**
- * Assembles transaction options for settle/close transactions. Direct
- * channels pay fees in their payment token; machine channels use PathUSD.
+ * Assembles transaction options for settle/close transactions. Machine
+ * channels pin PathUSD (or an explicit override); direct channels leave the
+ * fee token unset so balance-aware selection can pick a funded candidate.
+ * The rail comes from the caller so fee pinning always matches dispatch.
  */
 export function resolveChannelTransactionOptions(
   channel: Pick<ChannelStore.StoredPrecompileChannel, 'chainId' | 'token'>,
   options: SettlementTransactionOptions | undefined,
   account: viem_Account | undefined,
+  machineRouter: Address | undefined,
 ): Chain.ChannelTransactionOptions | undefined {
   if (!account) return undefined
-  const feeToken = MachineTokenSession.resolveFeeToken({
-    chainId: channel.chainId,
-    override: options?.feeToken,
-    paymentToken: channel.token,
-  })
+  const feeToken =
+    options?.feeToken ??
+    (machineRouter
+      ? MachineTokenSession.resolveFeeToken({
+          chainId: channel.chainId,
+          paymentToken: channel.token,
+        })
+      : undefined)
   return {
     account,
     ...(options?.feePayer ? { feePayer: options.feePayer } : {}),
     ...(options?.feePayerPolicy ? { feePayerPolicy: options.feePayerPolicy } : {}),
-    feeToken,
-    candidateFeeTokens: options?.candidateFeeTokens ?? [feeToken],
+    ...(feeToken ? { feeToken } : {}),
+    candidateFeeTokens: options?.candidateFeeTokens ?? [feeToken ?? channel.token],
   }
 }
 
@@ -479,7 +485,12 @@ export async function settle(
       sender: account?.address,
     })
   const amount = uint96(channel.highestVoucher.cumulativeAmount)
-  const transactionOptions = resolveChannelTransactionOptions(channel, options, account)
+  const transactionOptions = resolveChannelTransactionOptions(
+    channel,
+    options,
+    account,
+    machineRouter,
+  )
   let txHash: Hex
   if (machineRouter) {
     const authorizationSignature = channel.highestVoucher.authorizationSignature

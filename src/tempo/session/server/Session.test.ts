@@ -1016,6 +1016,18 @@ describe('precompile server session unit guardrails', () => {
     })
 
     expect(request.methodDetails.feeToken).toBe(feeToken)
+
+    // Clients released before the fee-token advertisement always pay sponsored
+    // open/top-up fees in the payment currency; both stay accepted.
+    const legacyPayload = await createSponsoredOpenPayload(token)
+    await method.validate!({
+      credential: {
+        challenge: { ...makeChallenge(legacyPayload.channelId), request },
+        payload: legacyPayload,
+      },
+      request: request as unknown as VerifyRequest,
+    })
+
     expect(rpcCalls).toEqual([])
   })
 

@@ -95,7 +95,7 @@ export function validateChannelDescriptor(
 }
 
 type ResolvedCredentialRoute = {
-  allowedFeeTokens: readonly [Address]
+  allowedFeeTokens: readonly Address[]
   expectedOperator: Address
   machineRouter?: Address | undefined
   payment: ChallengePaymentFields
@@ -124,16 +124,13 @@ async function resolveCredentialRoute(parameters: {
     isAddressEqual(descriptor.token, request.currency) &&
     isAddressEqual(descriptor.operator, expectedOperator)
 
-  const allowedFeeTokens = (paymentToken: Address): readonly [Address] => [
-    MachineTokenSession.resolveFeeToken({
-      chainId,
-      override: parameters.feeToken,
-      paymentToken,
-    }),
-  ]
   if (direct)
     return {
-      allowedFeeTokens: allowedFeeTokens(request.currency),
+      allowedFeeTokens: MachineTokenSession.allowedSponsoredFeeTokens({
+        chainId,
+        override: parameters.feeToken,
+        paymentToken: request.currency,
+      }),
       expectedOperator,
       payment: request,
     }
@@ -153,7 +150,13 @@ async function resolveCredentialRoute(parameters: {
     })
 
   return {
-    allowedFeeTokens: allowedFeeTokens(route.token),
+    allowedFeeTokens: [
+      MachineTokenSession.resolveFeeToken({
+        chainId,
+        override: parameters.feeToken,
+        paymentToken: route.token,
+      }),
+    ],
     expectedOperator: route.operator,
     machineRouter: route.operator,
     payment: { ...request, currency: route.token, recipient: route.payee },
@@ -1180,7 +1183,12 @@ async function handleCloseCredential(
   let txHash: Hex | undefined
   let receipt: Awaited<ReturnType<typeof Chain.waitForSuccessfulReceipt>>
   try {
-    const transactionOptions = resolveChannelTransactionOptions(channel, parameters, account)
+    const transactionOptions = resolveChannelTransactionOptions(
+      channel,
+      parameters,
+      account,
+      machineRouter,
+    )
     if (machineRouter) {
       if (!authorizationSignature || !refundSignature)
         throw new VerificationFailedError({
