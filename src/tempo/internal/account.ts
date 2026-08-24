@@ -1,6 +1,13 @@
 import type { Account, Address } from 'viem'
 import type { Account as TempoAccount } from 'viem/tempo'
 
+import * as RemoteFeePayer from './remote-fee-payer.js'
+
+/** Returns whether a value is a viem account. */
+export function is(value: unknown): value is Account {
+  return typeof value === 'object' && value !== null && 'address' in value
+}
+
 /** Returns whether an account is a Tempo access-key account. */
 export function isAccessKeyAccount(
   account: Account,
@@ -19,30 +26,22 @@ export function getAccountSignerAddress(account: Account): Address {
  * Accepts either `account` or `recipient` as the parameter name. When the value
  * is an `Account`, its address is extracted. If `feePayer` is `true`, the
  * account also acts as the fee payer. Alternatively, a separate `Account`
- * can be provided as the fee payer, or a URL string pointing to a fee payer
- * relay service (used with `withFeePayer` transport wrapping).
+ * can be provided as the fee payer, or remote fee-payer configuration (used
+ * with `withFeePayer` transport wrapping).
  *
- * @returns An object with `account`, `feePayer`, `feePayerUrl`, and `recipient`.
+ * @returns Resolved account, local fee payer, remote fee payer, and recipient.
  */
 export function resolve(parameters: resolve.Parameters) {
-  const account = (() => {
-    if (typeof parameters.account === 'object') return parameters.account
-    return undefined
-  })()
-  const recipient = (() => {
-    if (parameters.recipient) return parameters.recipient
-    if (typeof parameters.account === 'object') return parameters.account.address
-    return parameters.account
-  })()
-  const feePayerUrl = typeof parameters.feePayer === 'string' ? parameters.feePayer : undefined
-  const feePayer = (() => {
-    if (typeof parameters.feePayer === 'string') return undefined
-    if (typeof parameters.account === 'object' && parameters.feePayer === true)
-      return parameters.account
-    if (typeof parameters.feePayer === 'object') return parameters.feePayer
-    return undefined
-  })()
-  return { account, feePayer, feePayerUrl, recipient: recipient as Address | undefined }
+  const account = is(parameters.account) ? parameters.account : undefined
+  const recipient = parameters.recipient ?? account?.address ?? parameters.account
+  const remoteFeePayer = RemoteFeePayer.from(parameters.feePayer)
+  const feePayer =
+    parameters.feePayer === true
+      ? account
+      : is(parameters.feePayer)
+        ? parameters.feePayer
+        : undefined
+  return { account, feePayer, remoteFeePayer, recipient: recipient as Address | undefined }
 }
 
 export declare namespace resolve {
@@ -50,7 +49,10 @@ export declare namespace resolve {
     recipient?: Address | undefined
     /** Account or address that performs payment operations / receives payment. */
     account?: Account | Address | undefined
-    /** When `true`, the account also sponsors fees. An `Account` object or URL string can also be provided as a dedicated fee payer. */
-    feePayer?: Account | string | true | undefined
+    /**
+     * When `true`, the account also sponsors fees. An `Account` or remote fee-payer
+     * configuration can also be provided. A string is shorthand for its URL.
+     */
+    feePayer?: Account | RemoteFeePayer.Config | string | true | undefined
   }
 }

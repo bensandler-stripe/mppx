@@ -3,7 +3,6 @@ import {
   createClient,
   decodeFunctionData,
   formatUnits,
-  http,
   keccak256,
   parseEventLogs,
   type TransactionReceipt,
@@ -111,13 +110,13 @@ export function charge<const parameters extends charge.Parameters>(
       })
     : undefined
 
-  const { recipient, feePayer, feePayerUrl } = Account.resolve(parameters)
-  if (configuredFeeToken && feePayerUrl)
+  const { recipient, feePayer, remoteFeePayer } = Account.resolve(parameters)
+  if (configuredFeeToken && remoteFeePayer)
     throw new Error('`feeToken` can only be configured for a local fee payer.')
 
   const getClient = Client.getResolver({
     chain: { ...tempo_chain, experimental_preconfirmationTime: 500 },
-    feePayerUrl,
+    remoteFeePayer,
     getClient: parameters.getClient,
     rpcUrl: defaults.rpcUrl,
   })
@@ -307,7 +306,7 @@ export function charge<const parameters extends charge.Parameters>(
     const isFeePayerTx =
       methodDetails?.feePayer === true &&
       requestAllowsFeePayer &&
-      !!(typeof request.feePayer === 'object' ? request.feePayer : feePayer || feePayerUrl)
+      !!(Account.is(request.feePayer) ? request.feePayer : feePayer || remoteFeePayer)
     const transfers = getExpectedTransfers({ amount, memo, methodDetails, recipient })
     const machineTokenRoute = machineTokenEnabled
       ? MachineTokenCharge.matchRoute({
@@ -471,11 +470,9 @@ export function charge<const parameters extends charge.Parameters>(
 
       const resolvedFeePayer = (() => {
         if (request.feePayer === false) return credential ? false : undefined
-        const account = typeof request.feePayer === 'object' ? request.feePayer : feePayer
-        const requested = account ?? feePayer ?? feePayerUrl
-        if (credential) return account ?? (feePayerUrl ? true : undefined)
-        if (requested) return true
-        return undefined
+        const account = Account.is(request.feePayer) ? request.feePayer : feePayer
+        if (credential) return account ?? (remoteFeePayer ? true : undefined)
+        return account || remoteFeePayer ? true : undefined
       })()
 
       return {
@@ -518,7 +515,7 @@ export function charge<const parameters extends charge.Parameters>(
       const validated = await validateCredential(credential, request, context)
       const feePayerAccount =
         methodDetails?.feePayer === true && requestAllowsFeePayer
-          ? typeof request.feePayer === 'object'
+          ? Account.is(request.feePayer)
             ? request.feePayer
             : feePayer
           : undefined
@@ -570,8 +567,11 @@ export function charge<const parameters extends charge.Parameters>(
 
           try {
             const broadcastClient =
-              feePayerUrl && isFeePayerTx
-                ? createClient({ chain: client.chain!, transport: http(feePayerUrl) })
+              remoteFeePayer && isFeePayerTx
+                ? createClient({
+                    chain: client.chain!,
+                    transport: Client.remoteFeePayerTransport(remoteFeePayer),
+                  })
                 : client
             const allowedFeeTokens = FeePayer.defaultAllowedFeeTokens(chainId)
             if (isFeePayerTx) FeePayer.assertAllowedFeeToken(transaction, allowedFeeTokens)
@@ -615,7 +615,7 @@ export function charge<const parameters extends charge.Parameters>(
                   sponsor: completed.feePayer,
                 }
               }
-              if (feePayerUrl && isFeePayerTx) {
+              if (remoteFeePayer && isFeePayerTx) {
                 const completed = await FeePayer.preflightSponsorship({
                   transaction,
                   simulate: (request) => viem_call(client, request as never),
@@ -625,9 +625,9 @@ export function charge<const parameters extends charge.Parameters>(
                       challengeExpires: expires,
                       chainId: chainId ?? client.chain!.id,
                       details: { amount, currency, recipient },
+                      remoteFeePayer,
                       policy: transactionFeePayerPolicy,
                       transaction,
-                      url: feePayerUrl,
                     })
                     return { ...hosted, transaction }
                   },

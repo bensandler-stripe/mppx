@@ -335,12 +335,12 @@ export function session<const parameters extends session.Parameters>(
 
   const store = ChannelStore.fromStore(rawStore)
   const lastOnChainVerified = new Map<Hex, number>()
-  const { account, feePayer, feePayerUrl, recipient } = Account.resolve(parameters)
-  const configuredFeePayer = feePayer ?? feePayerUrl
-  const settlementFeePayer = feePayer ?? (feePayerUrl ? true : undefined)
+  const { account, feePayer, remoteFeePayer, recipient } = Account.resolve(parameters)
+  const configuredFeePayer =
+    feePayer ?? (remoteFeePayer || parameters.feePayer === true ? true : undefined)
   const getClient = Client.getResolver({
     chain: tempo_chain,
-    feePayerUrl,
+    remoteFeePayer,
     getClient: parameters.getClient,
     rpcUrl: defaults.rpcUrl,
   })
@@ -369,7 +369,7 @@ export function session<const parameters extends session.Parameters>(
       account,
       channel,
       client: await getClient({ chainId: channel.chainId }),
-      ...(settlementFeePayer ? { feePayer: settlementFeePayer } : {}),
+      ...(configuredFeePayer ? { feePayer: configuredFeePayer } : {}),
       feePayerPolicy: parameters.feePayerPolicy,
       feeToken: parameters.feeToken,
       onSessionSettlement,
@@ -561,7 +561,7 @@ export function session<const parameters extends session.Parameters>(
         matchSnapshotPaymentFields,
         parameterChainId: parameters.chainId,
         parameterEscrowContract: parameters.escrowContract,
-        parameterFeePayer: parameters.feePayer,
+        parameterFeePayer: configuredFeePayer,
         request,
         resolveChannelId: parameters.resolveChannelId,
         store,
