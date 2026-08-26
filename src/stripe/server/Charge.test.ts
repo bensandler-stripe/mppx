@@ -168,6 +168,9 @@ describe('stripe.charge with client', () => {
       enabled: true,
     })
     expect(options.idempotencyKey).toBe(`mpp_${challenge.id}_spt_test_token`)
+    expect(options.headers).toEqual({
+      'X-Request-Source': 'service="mppx"; project="machine_payments"',
+    })
   })
 
   test('behavior: includes metadata in client call', async () => {
@@ -316,6 +319,7 @@ describe('stripe.charge with client', () => {
     const headers = new Headers(init?.headers)
     expect(headers.get('Idempotency-Key')).toBe(`mpp_${credential.challenge.id}_spt_test_token`)
     expect(headers.get('Stripe-Account')).toBe('acct_connected')
+    expect(headers.get('X-Request-Source')).toBe('service="mppx"; project="machine_payments"')
     const body = init?.body as URLSearchParams
     expect(body.get('application_fee_amount')).toBe('12')
     expect(body.get('on_behalf_of')).toBe('acct_merchant')

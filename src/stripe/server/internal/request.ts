@@ -1,4 +1,4 @@
-import { stripePreviewVersion } from '../../internal/constants.js'
+import { stripePreviewVersion, stripeXRequestSource } from '../../internal/constants.js'
 import type { StripeClient } from '../../internal/types.js'
 
 export type ConnectConfig = {
@@ -27,6 +27,7 @@ export async function createPaymentIntent(
   }
   const result = await client.paymentIntents.create(fullParams as any, {
     apiVersion: stripePreviewVersion,
+    headers: { 'X-Request-Source': stripeXRequestSource },
     idempotencyKey: options?.idempotencyKey,
     stripeAccount: connect?.stripeAccount,
   })
@@ -43,6 +44,7 @@ export async function stripeRequest(
   options?: { connect?: ConnectConfig },
 ): Promise<unknown> {
   return client.rawRequest!(method, path, method === 'GET' ? undefined : params, {
+    additionalHeaders: { 'X-Request-Source': stripeXRequestSource },
     apiVersion: stripePreviewVersion,
     stripeAccount: options?.connect?.stripeAccount,
   })

@@ -75,7 +75,11 @@ describe('stripe.create() defaultMethods', () => {
 
     expect(client.paymentIntents.create).toHaveBeenCalledWith(
       expect.objectContaining({ metadata: { agent_id: 'test-agent' } }),
-      expect.anything(),
+      expect.objectContaining({
+        headers: {
+          'X-Request-Source': 'service="mppx"; project="machine_payments"',
+        },
+      }),
     )
   })
 
@@ -290,6 +294,37 @@ describe('stripe.create() deposit address cache isolation', () => {
 
     expect(addr1).toBe(addr2)
     expect(client.rawRequest).toHaveBeenCalledOnce()
+    expect(client.rawRequest).toHaveBeenCalledWith(
+      'GET',
+      '/v1/crypto/deposit_addresses?network=tempo&limit=1',
+      undefined,
+      expect.objectContaining({
+        additionalHeaders: {
+          'X-Request-Source': 'service="mppx"; project="machine_payments"',
+        },
+      }),
+    )
+  })
+
+  test('attributes deposit address creation requests', async () => {
+    const client = createMockStripeClient()
+    vi.mocked(client.rawRequest!)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ address: '0xnew' })
+    const mp = stripe({ client, networkId: 'profile', livemode: false })
+
+    expect(await mp.findOrCreateDepositAddress('base')).toBe('0xnew')
+    expect(client.rawRequest).toHaveBeenNthCalledWith(
+      2,
+      'POST',
+      '/v1/crypto/deposit_addresses',
+      { network: 'base' },
+      expect.objectContaining({
+        additionalHeaders: {
+          'X-Request-Source': 'service="mppx"; project="machine_payments"',
+        },
+      }),
+    )
   })
 })
 

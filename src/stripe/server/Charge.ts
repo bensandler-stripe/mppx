@@ -10,7 +10,7 @@ import type { ConfiguredDefaults, LooseOmit, MaybePromise, OneOf } from '../../i
 import * as Method from '../../Method.js'
 import type * as Html from '../../server/internal/html/config.ts'
 import type * as z from '../../zod.js'
-import { stripePreviewVersion } from '../internal/constants.js'
+import { stripePreviewVersion, stripeXRequestSource } from '../internal/constants.js'
 import type {
   StripeClient,
   CreatePaymentMethodFromElements,
@@ -343,6 +343,7 @@ async function createWithClient(parameters: {
     }
     const paymentIntentOptions = {
       apiVersion: stripePreviewVersion,
+      headers: { 'X-Request-Source': stripeXRequestSource },
       idempotencyKey: `mpp_${challenge.id}_${spt}`,
       ...(settlement?.stripeAccount !== undefined && { stripeAccount: settlement.stripeAccount }),
     }
@@ -398,6 +399,7 @@ async function createWithSecretKey(parameters: {
     'Content-Type': 'application/x-www-form-urlencoded',
     'Idempotency-Key': `mpp_${challenge.id}_${spt}`,
     'Stripe-Version': stripePreviewVersion,
+    'X-Request-Source': stripeXRequestSource,
     ...(settlement?.stripeAccount !== undefined && { 'Stripe-Account': settlement.stripeAccount }),
   }
 
