@@ -178,7 +178,13 @@ export type PaymentSuccessContext<
   input?: Transport.InputOf<transport> | undefined
   method: ServerMethodDescriptor<method>
   receipt: Receipt.Receipt
+  /** Canonical request represented by the challenge. */
   request: z.output<method['schema']['request']>
+  /**
+   * Resolved method input before request-schema output transforms. Absent during
+   * standalone credential verification when no route options are supplied.
+   */
+  requestInput?: z.input<method['schema']['request']> | undefined
 }>
 
 /** Options for standalone credential verification. */
@@ -533,6 +539,7 @@ export function create<
             input: ctx.input,
             receipt: ctx.receipt,
             request: ctx.request,
+            ...(ctx.requestInput !== undefined && { requestInput: ctx.requestInput }),
           })
         }
       }) as never)
@@ -799,6 +806,7 @@ export function create<
       parsedCredential,
       parsedRequest,
       request,
+      requestInput: shouldValidateRoute ? request : undefined,
     }
   }
 
@@ -820,7 +828,14 @@ export function create<
     options?: VerifyCredentialOptions,
   ): Promise<Receipt.Receipt> {
     const prepared = await prepareStandaloneCredential(input, options, { emitFailures: true })
-    const { method: mi, parsedCredential, parsedRequest, request, envelope } = prepared
+    const {
+      method: mi,
+      parsedCredential,
+      parsedRequest,
+      request,
+      requestInput,
+      envelope,
+    } = prepared
 
     const emitStandalonePaymentFailed = async (parameters: {
       challenge: Challenge.Challenge
@@ -871,6 +886,7 @@ export function create<
         method: mi,
         receipt,
         request: parsedRequest,
+        ...(requestInput !== undefined && { requestInput }),
       }) as never,
     )
 
@@ -1271,6 +1287,7 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
                   method,
                   receipt: authorized.receipt,
                   request: parsedRequest,
+                  requestInput: request,
                 }) as never,
               )
               return success(authorized.receipt, {
@@ -1507,6 +1524,7 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
           method,
           receipt: receiptData,
           request: parsedRequest,
+          requestInput: request,
         }) as never,
       )
 
@@ -1774,6 +1792,7 @@ function createPaymentSuccessContext(parameters: {
   method: Method.Method | ServerMethodDescriptor
   receipt: Receipt.Receipt
   request: Record<string, unknown>
+  requestInput?: Record<string, unknown> | undefined
 }): PaymentSuccessContext {
   return Object.freeze({
     ...(parameters.capturedRequest
@@ -1786,6 +1805,9 @@ function createPaymentSuccessContext(parameters: {
     method: snapshotMethod(parameters.method),
     receipt: snapshotValue(parameters.receipt),
     request: snapshotValue(parameters.request),
+    ...(parameters.requestInput !== undefined && {
+      requestInput: snapshotValue(parameters.requestInput),
+    }),
   }) as never
 }
 
@@ -1837,8 +1859,59 @@ function snapshotValue<value>(value: value): value {
   try {
     return freezeSnapshot(structuredClone(value))
   } catch {
-    return freezeSnapshot(value)
+    return freezeSnapshot(cloneSnapshotFallback(value))
   }
+}
+
+/**
+ * Copies object containers when `structuredClone` rejects callable values.
+ * Functions remain callable references, while their containing request data is
+ * detached so snapshot freezing and nested writes cannot affect hook-owned
+ * objects.
+ */
+function cloneSnapshotFallback<value>(value: value, seen = new WeakMap<object, unknown>()): value {
+  if (!value || typeof value !== 'object') return value
+
+  const existing = seen.get(value)
+  if (existing) return existing as value
+
+  if (value instanceof Date) return new Date(value) as value
+  if (value instanceof RegExp) return new RegExp(value.source, value.flags) as value
+  if (value instanceof URL) return new URL(value) as value
+  if (value instanceof Headers) return new Headers(value) as value
+  if (value instanceof ArrayBuffer) return value.slice(0) as value
+  if (ArrayBuffer.isView(value)) {
+    const buffer = new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice().buffer
+    if (value instanceof DataView) return new DataView(buffer) as value
+    const Constructor = value.constructor as new (buffer: ArrayBuffer) => value
+    return new Constructor(buffer)
+  }
+
+  if (value instanceof Map) {
+    const snapshot = new Map()
+    seen.set(value, snapshot)
+    for (const [key, entry] of value)
+      snapshot.set(cloneSnapshotFallback(key, seen), cloneSnapshotFallback(entry, seen))
+    return snapshot as value
+  }
+
+  if (value instanceof Set) {
+    const snapshot = new Set()
+    seen.set(value, snapshot)
+    for (const entry of value) snapshot.add(cloneSnapshotFallback(entry, seen))
+    return snapshot as value
+  }
+
+  const snapshot = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value))
+  seen.set(value, snapshot)
+  for (const key of Reflect.ownKeys(value)) {
+    if (Array.isArray(value) && key === 'length') continue
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor) continue
+    if ('value' in descriptor) descriptor.value = cloneSnapshotFallback(descriptor.value, seen)
+    Object.defineProperty(snapshot, key, descriptor)
+  }
+  return snapshot as value
 }
 
 function snapshotInputProperty(input: unknown): { input: unknown } | {} {

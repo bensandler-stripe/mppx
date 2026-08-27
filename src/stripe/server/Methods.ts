@@ -4,6 +4,8 @@ import type * as Method from '../../Method.js'
 import * as tempoDefaults from '../../tempo/internal/defaults.js'
 import { charge as tempoCharge } from '../../tempo/server/Charge.js'
 import { session as tempoSession } from '../../tempo/session/server/Session.js'
+import * as z from '../../zod.js'
+import * as PaymentIntent from '../internal/payment-intent.js'
 import type { StripeClient } from '../internal/types.js'
 import { charge as charge_ } from './Charge.js'
 import { findOrCreateDepositAddress as _findOrCreateDepositAddress } from './internal/deposit-address.js'
@@ -222,14 +224,16 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
     const handler = callMetadata
       ? createPaymentSuccessHandler(client, 'tempo', connect, { ...metadata, ...callMetadata })
       : tempoPaymentHandler
-    return tempoCharge({
-      currency: tempoCurrency,
-      recipient,
-      ...(!livemode && { testnet: true }),
-      canOffer: cryptoCanOffer,
-      onPaymentSuccess: handler,
-      ...rest,
-    }) as Method.AnyServer
+    return withPaymentIntentInput(
+      tempoCharge({
+        currency: tempoCurrency,
+        recipient,
+        ...(!livemode && { testnet: true }),
+        canOffer: cryptoCanOffer,
+        onPaymentSuccess: handler,
+        ...rest,
+      }) as Method.AnyServer,
+    )
   }
 
   function makeTempoSession(
@@ -251,14 +255,16 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
     const handler = callMetadata
       ? createPaymentSuccessHandler(client, 'base', connect, { ...metadata, ...callMetadata })
       : basePaymentHandler
-    return evmCharge({
-      currency: livemode ? EvmAssets.base.USDC : EvmAssets.baseSepolia.USDC,
-      recipient,
-      x402,
-      canOffer: cryptoCanOffer,
-      onPaymentSuccess: handler,
-      ...rest,
-    }) as Method.AnyServer
+    return withPaymentIntentInput(
+      evmCharge({
+        currency: livemode ? EvmAssets.base.USDC : EvmAssets.baseSepolia.USDC,
+        recipient,
+        x402,
+        canOffer: cryptoCanOffer,
+        onPaymentSuccess: handler,
+        ...rest,
+      }) as Method.AnyServer,
+    )
   }
 
   const defaultMethodBuilders: Record<
@@ -326,7 +332,9 @@ export function stripe<const P extends stripe.Parameters>(parameters: P): Stripe
           const canOffer = m.canOffer
             ? (params: any) => cryptoCanOffer(params) && m.canOffer!(params)
             : cryptoCanOffer
-          result.push({ ...m, canOffer, onPaymentSuccess } as Method.AnyServer)
+          result.push(
+            withPaymentIntentInput({ ...m, canOffer, onPaymentSuccess } as Method.AnyServer),
+          )
         }
       }
     }
@@ -436,16 +444,85 @@ function createPaymentSuccessHandler(
   connect?: ConnectConfig,
   metadata?: Record<string, string>,
 ) {
-  return (params: { receipt: any; request: any }) => {
-    const { receipt, request } = params
+  return (params: { receipt: any; request: any; requestInput?: any }) => {
+    const { receipt, request, requestInput } = params
     if (receipt?.reference && request?.amount) {
+      const resolvedMetadata = {
+        ...metadata,
+        ...requestInput?.paymentIntentOptions?.metadata,
+      }
       return recordCryptoPayment(client, {
         network,
         reference: receipt.reference,
         amount: String(request.amount),
         ...(connect && { connect }),
-        ...(metadata && { metadata }),
+        ...(Object.keys(resolvedMetadata).length > 0 && { metadata: resolvedMetadata }),
       })
     }
   }
+}
+
+/**
+ * Extends a rail's server-only input with Stripe PaymentIntent options while
+ * keeping its canonical request unchanged. The schema strips the options
+ * before challenge serialization, and delegated lifecycle hooks receive the
+ * underlying rail request without Stripe-only fields. The wrapper retains the
+ * options only in `requestInput` for payment-success recording.
+ */
+function withPaymentIntentInput(method: Method.AnyServer): Method.AnyServer {
+  const baseSchema = method.schema.request
+  const baseRequest = method.request
+  const baseRespond = method.respond
+  const baseBroadcast = method.broadcast
+  const baseValidate = method.validate
+  const baseVerify = method.verify
+
+  return {
+    ...method,
+    // Accept Stripe-only options without changing the canonical rail schema.
+    schema: {
+      ...method.schema,
+      request: z.pipe(
+        z.custom<
+          z.input<typeof baseSchema> & {
+            paymentIntentOptions?: PaymentIntent.Options | undefined
+          }
+        >(),
+        z.transform((input) => {
+          const { paymentIntentOptions, ...request } = input
+          z.optional(PaymentIntent.Schema).parse(paymentIntentOptions)
+          // Only the base schema's output is included in the challenge.
+          return baseSchema.parse(request)
+        }),
+      ),
+    },
+    async request(context: Method.RequestContext<Method.AnyServer>) {
+      const { paymentIntentOptions, ...request } = context.request
+      const resolved = baseRequest ? await baseRequest({ ...context, request }) : request
+      return { ...resolved, paymentIntentOptions }
+    },
+    ...(baseRespond && {
+      respond: (context: Method.RespondContext<Method.AnyServer>) =>
+        baseRespond(withoutPaymentIntentOptions(context)),
+    }),
+    ...(baseBroadcast && {
+      broadcast: (context: Method.VerifyContext<Method.AnyServer>) =>
+        baseBroadcast(withoutPaymentIntentOptions(context)),
+    }),
+    ...(baseValidate && {
+      validate: (context: Method.ValidateContext<Method.AnyServer>) =>
+        baseValidate(withoutPaymentIntentOptions(context)),
+    }),
+    ...(baseVerify && {
+      verify: (context: Method.VerifyContext<Method.AnyServer>) =>
+        baseVerify(withoutPaymentIntentOptions(context)),
+    }),
+  }
+}
+
+function withoutPaymentIntentOptions<context extends { request: Record<string, unknown> }>(
+  context: context,
+): context {
+  const { paymentIntentOptions: _, ...request } = context.request
+  return { ...context, request }
 }
