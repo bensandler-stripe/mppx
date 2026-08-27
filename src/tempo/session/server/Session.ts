@@ -239,10 +239,12 @@ async function verifyBootstrapCredential(parameters: {
     })
   Expires.assert(credential.challenge.expires, credential.challenge.id)
   assertBootstrapChallengeMatches(challenge, credential.challenge)
+  const payload = Methods.charge.schema.credential.payload.safeParse(credential.payload)
+  if (!payload.success) throw new Errors.InvalidPayloadError()
   return charge.verify({
     credential: {
       ...credential,
-      payload: Methods.charge.schema.credential.payload.parse(credential.payload),
+      payload: payload.data,
     } as never,
     request: rawRequest,
   })
@@ -273,7 +275,7 @@ async function handleBootstrapPreflight(
   } catch (error) {
     return respondBootstrapChallenge(
       challenge,
-      error instanceof Errors.PaymentError ? error : new Errors.VerificationFailedError(),
+      error instanceof Errors.PaymentError ? error : new Errors.InternalPaymentError(),
     )
   }
 

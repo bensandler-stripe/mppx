@@ -18,6 +18,7 @@ type CallToolRequestOptions = Parameters<Client['callTool']>[2]
 type PaymentRequiredData = NonNullable<core_Mcp.ErrorObject['data']>
 
 const MPPX_MCP_CLIENT_WRAPPER = Symbol.for('mppx.mcp.client.wrapper')
+const maxPaymentAttempts = 3
 
 export type OnPaymentRequired = (challenge: Challenge.Challenge) => boolean | Promise<boolean>
 
@@ -151,7 +152,9 @@ export function isPaymentRequiredError(
 ): error is McpError & { data: PaymentRequiredData } {
   if (typeof error !== 'object' || error === null) return false
   if (!('code' in error) || !('message' in error)) return false
-  if ((error as { code: unknown }).code !== core_Mcp.paymentRequiredCode) return false
+  const code = (error as { code: unknown }).code
+  if (code !== core_Mcp.paymentRequiredCode && code !== core_Mcp.paymentVerificationFailedCode)
+    return false
   return isPaymentRequiredData((error as { data?: unknown }).data)
 }
 
@@ -199,7 +202,8 @@ function createPaymentAwareCallTool<methods extends Methods>(
     call: CallToolCall,
     paymentRequired: PaymentRequiredData,
     cause: unknown,
-  ) => {
+    attemptsRemaining = maxPaymentAttempts,
+  ): Promise<CallToolResult> => {
     const challenges = paymentRequired.challenges
     const candidates = AcceptPayment.selectChallengeCandidates(
       challenges,
@@ -234,19 +238,33 @@ function createPaymentAwareCallTool<methods extends Methods>(
     })
     const parsed = Credential.deserialize(credential)
 
-    const retryResult = await callTool(
-      {
-        ...params,
-        _meta: {
-          ...params._meta,
-          [core_Mcp.credentialMetaKey]: parsed,
+    try {
+      const retryResult = await callTool(
+        {
+          ...params,
+          _meta: {
+            ...params._meta,
+            [core_Mcp.credentialMetaKey]: parsed,
+          },
         },
-      },
-      call.resultSchema,
-      call.requestOptions,
-    )
+        call.resultSchema,
+        call.requestOptions,
+      )
 
-    return withReceipt(retryResult)
+      const nextPaymentRequired = getPaymentRequiredMeta(retryResult)
+      if (nextPaymentRequired && attemptsRemaining > 1)
+        return retryWithPayment(
+          params,
+          call,
+          nextPaymentRequired,
+          retryResult,
+          attemptsRemaining - 1,
+        )
+      return withReceipt(retryResult)
+    } catch (error) {
+      if (!isPaymentRequiredError(error) || attemptsRemaining <= 1) throw error
+      return retryWithPayment(params, call, error.data, error, attemptsRemaining - 1)
+    }
   }
 
   return async (params, call) => {
