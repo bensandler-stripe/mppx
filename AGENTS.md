@@ -193,6 +193,17 @@ pnpm test                  # Run tests with vitest
 pnpm test:html             # Run HTML tests with playwright
 ```
 
+### Local Unit Tests Without Tempo RPC
+
+On laptops without the Tempo Docker localnet, disable network setup:
+
+```bash
+VITE_TEMPO_NETWORK=none pnpm exec vp test --run --project node
+```
+
+Use the same prefix for focused unit tests. Tempo integration tests still require the local RPC
+at `localhost:18545`.
+
 ## Skills Reference
 
 Load these skills for specialized guidance:
