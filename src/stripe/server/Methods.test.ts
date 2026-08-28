@@ -75,7 +75,9 @@ describe('stripe.create() defaultMethods', () => {
     })
 
     expect(client.paymentIntents.create).toHaveBeenCalledWith(
-      expect.objectContaining({ metadata: { agent_id: 'test-agent', request_id: 'req_123' } }),
+      expect.objectContaining({
+        metadata: { agent_id: 'test-agent', machine_payment: 'true', request_id: 'req_123' },
+      }),
       expect.anything(),
     )
   })

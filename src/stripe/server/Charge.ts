@@ -10,7 +10,7 @@ import type { ConfiguredDefaults, LooseOmit, MaybePromise, OneOf } from '../../i
 import * as Method from '../../Method.js'
 import type * as Html from '../../server/internal/html/config.ts'
 import type * as z from '../../zod.js'
-import { stripePreviewVersion } from '../internal/constants.js'
+import { machinePaymentMetadata, stripePreviewVersion } from '../internal/constants.js'
 import type {
   StripeClient,
   CreatePaymentMethodFromElements,
@@ -184,6 +184,7 @@ export function charge<const parameters extends charge.Parameters>(parameters: p
         ...buildAnalytics({ credential }),
         ...userMetadata,
         ...paymentIntentOptions?.metadata,
+        ...machinePaymentMetadata,
       }
       const settlement = validateConnectSettlement({
         amount: resolvedRequest.amount,
