@@ -1,3 +1,4 @@
+import { machinePaymentMetadata } from '../../internal/constants.js'
 import type { StripeClient } from '../../internal/types.js'
 import type { stripe } from '../Methods.js'
 import { createPaymentIntent, type ConnectConfig } from './request.js'
@@ -51,7 +52,7 @@ export function recordCryptoPayment(
           },
         },
       },
-      ...(metadata && { metadata }),
+      metadata: { ...metadata, ...machinePaymentMetadata },
     },
     {
       idempotencyKey: reference,

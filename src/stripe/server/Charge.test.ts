@@ -213,6 +213,7 @@ describe('stripe.charge with client', () => {
 
     const [params] = create.mock.calls[0]!
     expect(params.metadata).toMatchObject({ plan: 'enterprise', request_id: 'req_123' })
+    expect(params.metadata).toHaveProperty('machine_payment', 'true')
     expect(params.metadata).not.toHaveProperty('mpp_is_mpp')
     expect(params.metadata).not.toHaveProperty('mpp_version')
   })
